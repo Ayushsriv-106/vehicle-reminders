@@ -1,0 +1,109 @@
+# =============================================================================
+# VEHICLE REMINDERS — Source of truth
+# =============================================================================
+# Edit this file to add/update your vehicles and documents.
+# Date format: YYYY-MM-DD
+# After editing, just `git commit` and `git push` — the Action handles the rest.
+# =============================================================================
+
+settings:
+  # Days before expiry when you want to be reminded.
+  # The system checks daily; you'll get an email on any of these matching days,
+  # plus daily once it's overdue.
+  reminder_days: [60, 30, 15, 7, 3, 1, 0]
+  timezone: "Asia/Kolkata"
+
+vehicles:
+  - id: swift-2020
+    name: "Maruti Swift VXI"
+    registration_number: "UP32 AB 1234"
+    type: "Car"
+    owner: "Your Name"
+    purchase_date: "2020-06-15"
+    notes: "Daily driver"
+
+    documents:
+      - type: "Insurance"
+        provider: "HDFC Ergo"
+        policy_number: "POL-12345-XYZ"
+        expiry_date: "2026-06-14"
+        amount: 8500
+        file_link: "https://drive.google.com/file/d/your-insurance-pdf-id/view"
+
+      - type: "PUC"
+        expiry_date: "2026-05-10"
+        amount: 100
+        file_link: "https://drive.google.com/file/d/your-puc-pdf-id/view"
+
+      - type: "Registration (RC)"
+        expiry_date: "2035-06-15"
+        file_link: "https://drive.google.com/file/d/your-rc-pdf-id/view"
+
+      - type: "Road Tax"
+        expiry_date: "2035-06-15"
+        amount: 45000
+        file_link: ""
+
+    services:
+      - type: "General Service"
+        last_done: "2025-11-20"
+        interval_months: 6
+        odometer_km: 58420
+        cost: 4500
+        workshop: "Maruti Service Center, Lucknow"
+
+      - type: "Tyre Replacement"
+        last_done: "2023-03-10"
+        interval_months: 60
+        cost: 24000
+
+      - type: "Battery Replacement"
+        last_done: "2023-08-15"
+        interval_months: 36
+        cost: 7500
+
+  - id: activa-2022
+    name: "Honda Activa 6G"
+    registration_number: "UP32 CD 5678"
+    type: "Scooter"
+    owner: "Your Name"
+    purchase_date: "2022-01-20"
+    notes: "Wife's commute"
+
+    documents:
+      - type: "Insurance"
+        provider: "ICICI Lombard"
+        policy_number: "POL-98765-ABC"
+        expiry_date: "2026-05-03"
+        amount: 1200
+        file_link: ""
+
+      - type: "PUC"
+        expiry_date: "2026-04-22"
+        amount: 100
+        file_link: ""
+
+      - type: "Registration (RC)"
+        expiry_date: "2037-01-20"
+        file_link: ""
+
+    services:
+      - type: "General Service"
+        last_done: "2026-02-15"
+        interval_months: 4
+        odometer_km: 18250
+        cost: 850
+        workshop: "Honda Service Center"
+
+# Personal documents (not tied to a specific vehicle)
+personal:
+  - type: "Driving Licence"
+    owner: "Your Name"
+    number: "UP3220200001234"
+    expiry_date: "2040-06-15"
+    file_link: ""
+
+  - type: "FASTag KYC"
+    owner: "Your Name"
+    expiry_date: "2027-03-10"
+    file_link: ""
