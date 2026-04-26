@@ -36,6 +36,14 @@ class Item:
 # ---------- Loading & computation ----------------------------------------- #
 
 def load_config(path: str | Path = "data/vehicles.yaml") -> dict:
+    """Load config from Google Sheet (if SHEET_CSV_URL env var is set) or YAML file."""
+    import os
+    sheet_url = os.environ.get("SHEET_CSV_URL", "").strip()
+    if sheet_url:
+        # Import here so yaml-only installs don't fail if sheet_loader has issues
+        from sheet_loader import load_config_from_sheet
+        return load_config_from_sheet(sheet_url)
+
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
