@@ -49,11 +49,36 @@ def load_config(path: str | Path = "data/vehicles.yaml") -> dict:
 
 
 def _parse_date(value: Any) -> date:
+    """Parse a date from various formats: YYYY-MM-DD, DD/MM/YYYY, DD-MM-YYYY, etc."""
     if isinstance(value, date):
         return value
     if isinstance(value, datetime):
         return value.date()
-    return datetime.strptime(str(value), "%Y-%m-%d").date()
+
+    s = str(value).strip()
+    if not s:
+        raise ValueError("Empty date value")
+
+    # Try multiple common date formats
+    formats = [
+        "%Y-%m-%d",      # 2025-04-14 (ISO)
+        "%d/%m/%Y",      # 14/04/2025 (Indian/UK)
+        "%d-%m-%Y",      # 14-04-2025
+        "%m/%d/%Y",      # 04/14/2025 (US)
+        "%d/%m/%y",      # 14/04/25
+        "%d-%b-%Y",      # 14-Apr-2025
+        "%d %b %Y",      # 14 Apr 2025
+        "%d-%B-%Y",      # 14-April-2025
+        "%Y/%m/%d",      # 2025/04/14
+    ]
+
+    for fmt in formats:
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+
+    raise ValueError(f"Unable to parse date: '{s}'. Expected YYYY-MM-DD or DD/MM/YYYY.")
 
 
 def classify_urgency(days_left: int) -> str:
@@ -100,7 +125,12 @@ def build_items(config: dict, today: date | None = None) -> list[Item]:
 
     for vehicle in config.get("vehicles", []):
         for doc in vehicle.get("documents", []):
-            expiry = _parse_date(doc["expiry_date"])
+            try:
+                expiry = _parse_date(doc["expiry_date"])
+            except ValueError as e:
+                # Skip docs with bad dates rather than failing entire run
+                print(f"⚠️  Skipping {vehicle.get('name', '?')} {doc.get('type', '?')}: {e}")
+                continue
             days_left = (expiry - today).days
             items.append(Item(
                 vehicle_id=vehicle["id"],
@@ -117,12 +147,20 @@ def build_items(config: dict, today: date | None = None) -> list[Item]:
             ))
 
         for service in vehicle.get("services", []):
-            item = _make_service_item(vehicle, service, today)
-            if item:
-                items.append(item)
+            try:
+                item = _make_service_item(vehicle, service, today)
+                if item:
+                    items.append(item)
+            except ValueError as e:
+                print(f"⚠️  Skipping service for {vehicle.get('name', '?')}: {e}")
+                continue
 
     for personal in config.get("personal", []):
-        expiry = _parse_date(personal["expiry_date"])
+        try:
+            expiry = _parse_date(personal["expiry_date"])
+        except ValueError as e:
+            print(f"⚠️  Skipping personal {personal.get('type', '?')}: {e}")
+            continue
         days_left = (expiry - today).days
         items.append(Item(
             vehicle_id="personal",
