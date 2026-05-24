@@ -2,7 +2,7 @@ name: Vehicle Reminders
 
 on:
   schedule:
-    # 08:30 IST daily = 03:00 UTC — rebuild (fresh "days left") + send the digest
+    # 08:30 IST daily = 03:00 UTC — rebuild the dashboard (fresh "days left") + redeploy
     - cron: "0 3 * * *"
   push:
     branches: [main]
@@ -12,12 +12,7 @@ on:
       - "functions/**"
       - "wrangler.toml"
       - ".github/workflows/**"
-  workflow_dispatch:
-    inputs:
-      skip_email:
-        description: "Skip sending the reminder email"
-        type: boolean
-        default: false
+  workflow_dispatch: {}
 
 permissions:
   contents: read
@@ -27,7 +22,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-deploy-email:
+  build-deploy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -76,15 +71,6 @@ jobs:
           # Deploy static assets + Functions; KV binding (DOCS) comes from wrangler.toml.
           $WR pages deploy docs --project-name=garage-fleet --branch=main --commit-dirty=true
 
-      - name: Send reminder email
-        if: ${{ always() && github.event.inputs.skip_email != 'true' }}
-        env:
-          SHEET_CSV_URL: ${{ secrets.SHEET_CSV_URL }}
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
-          EMAIL_TO: ${{ secrets.EMAIL_TO }}
-          DASHBOARD_URL: ${{ vars.DASHBOARD_URL }}
-        run: python scripts/send_reminders.py
+      # Reminder emails are intentionally OFF — the team uses the live dashboard
+      # (garage-fleet.pages.dev). To re-enable, restore a step that runs
+      # scripts/send_reminders.py with the SMTP_* / EMAIL_* secrets.
