@@ -21,6 +21,10 @@ URGENCY_META = {
     "warning":  {"emoji": "🟡", "label": "Upcoming", "color": "#d4a017"},
 }
 
+# Live GitHub Pages dashboard — used when the DASHBOARD_URL env/var isn't set,
+# so the email always has a working "Open full dashboard" button.
+DEFAULT_DASHBOARD_URL = "https://ayushsriv-106.github.io/vehicle-reminders/"
+
 
 def _fmt_days(days: int) -> str:
     if days < 0:
@@ -82,12 +86,11 @@ def render_email_html(items: list[Item]) -> str:
           </table>
         """)
 
-    dashboard_url = os.environ.get("DASHBOARD_URL", "")
+    dashboard_url = os.environ.get("DASHBOARD_URL", "").strip() or DEFAULT_DASHBOARD_URL
     dashboard_link = (
         f'<p style="margin-top:24px;"><a href="{dashboard_url}" '
         f'style="background:#111;color:#fff;padding:10px 18px;border-radius:6px;'
         f'text-decoration:none;display:inline-block;">Open full dashboard →</a></p>'
-        if dashboard_url else ""
     )
 
     return f"""<!DOCTYPE html>
@@ -98,7 +101,7 @@ def render_email_html(items: list[Item]) -> str:
   {''.join(sections_html)}
   {dashboard_link}
   <hr style="margin:32px 0;border:none;border-top:1px solid #eee;">
-  <p style="color:#999;font-size:12px;">Automated by your vehicle-reminders repo. Edit data/vehicles.yaml to update.</p>
+  <p style="color:#999;font-size:12px;">You only get this mail in the two weeks around an expiry — the dashboard always has the full picture. Update details in your fleet sheet.</p>
 </body></html>"""
 
 
@@ -141,10 +144,11 @@ def send_email(subject: str, html_body: str, text_body: str) -> None:
 def main() -> int:
     config = load_config()
     settings = config.get("settings", {})
-    reminder_days = settings.get("reminder_days", [30, 15, 7, 3, 1, 0])
+    reminder_days = settings.get("reminder_days", [14, 7, 3, 1, 0])
+    overdue_reminder_days = settings.get("overdue_reminder_days", [1, 3, 7, 14, 30])
 
     items = build_items(config)
-    due = items_needing_email(items, reminder_days)
+    due = items_needing_email(items, reminder_days, overdue_reminder_days)
 
     if not due:
         print("✅ Nothing to remind about today. Skipping email.")

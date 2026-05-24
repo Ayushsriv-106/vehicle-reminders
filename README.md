@@ -1,2 +1,51 @@
 # vehicle-reminders
-Automated vehicle document reminders
+
+Automated vehicle document reminders — a live dashboard plus a deliberately quiet email nudge.
+
+**Dashboard:** https://ayushsriv-106.github.io/vehicle-reminders/
+The dashboard is the source of truth. It rebuilds and redeploys every day and always shows the full picture — every vehicle, every document, overdue items in red.
+
+## How reminders work
+
+Data lives in a Google Sheet (published as CSV, wired in via the `SHEET_CSV_URL` secret). A GitHub Actions job runs daily, rebuilds the dashboard, and sends **at most one summary email** — but only on a handful of days around each expiry, so it never turns into daily spam:
+
+- **Before expiry:** `reminder_days` — emails on 14, 7, 3, 1 and 0 days before.
+- **After expiry:** `overdue_reminder_days` — nudges on 1, 3, 7, 14 and 30 days overdue, then **goes silent**.
+
+A document that expired long ago (say 1227 days) is past every overdue threshold, so it stops emailing entirely — it just stays visible on the dashboard. On days when nothing is in those windows, no email is sent at all.
+
+Tune the cadence by editing the `settings` block — either in the Google Sheet defaults (`scripts/sheet_loader.py` → `DEFAULT_SETTINGS`) or the `data/vehicles.yaml` fallback. For example, to keep nagging chronic lapses, add a far value like `90` to `overdue_reminder_days`.
+
+## Layout
+
+| Path | Purpose |
+|------|---------|
+| `scripts/core.py` | Data model + reminder-selection logic (`items_needing_email`) |
+| `scripts/send_reminders.py` | Builds and sends the summary email |
+| `scripts/build_dashboard.py` | Builds `docs/index.html` (deployed to GitHub Pages) |
+| `scripts/sheet_loader.py` | Fetches the Google Sheet CSV → config |
+| `scripts/test_core.py` | Tests for the reminder-selection rules |
+| `data/vehicles.yaml` | Fallback data + default settings (sheet wins when configured) |
+| `.github/workflows/reminders.yml` | Daily cron, dashboard build, email, Pages deploy |
+
+## Run locally
+
+```bash
+pip install -r requirements.txt
+
+# Run the tests
+python scripts/test_core.py
+
+# Build the dashboard from the YAML fallback (no sheet needed)
+python scripts/build_dashboard.py   # writes docs/index.html
+```
+
+`docs/` is generated and git-ignored — CI rebuilds it from the live sheet on every run.
+
+## Secrets / variables
+
+Set in the repo's Actions secrets:
+
+- `SHEET_CSV_URL` — published Google Sheet CSV link
+- `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `EMAIL_FROM`, `EMAIL_TO` — mail delivery
+- `DASHBOARD_URL` *(optional variable)* — link used in the email button; falls back to the GitHub Pages URL if unset.

@@ -178,10 +178,31 @@ def build_items(config: dict, today: date | None = None) -> list[Item]:
     return items
 
 
-def items_needing_email(items: list[Item], reminder_days: list[int]) -> list[Item]:
-    """Filter to items whose days_left is in the reminder list, or overdue."""
-    thresholds = set(reminder_days)
-    return [
-        i for i in items
-        if i.days_left in thresholds or i.days_left < 0
-    ]
+def items_needing_email(
+    items: list[Item],
+    reminder_days: list[int],
+    overdue_reminder_days: list[int] | None = None,
+) -> list[Item]:
+    """Pick the items worth emailing about today — deliberately quiet so the
+    daily mail never feels like spam.
+
+    An item is emailed only on a few discrete days:
+      * ``reminder_days`` — exact days *before* expiry (e.g. 14, 7, 3, 1, 0).
+      * ``overdue_reminder_days`` — exact days *after* expiry (e.g. 1, 3, 7,
+        14, 30). After the last of these the item goes silent in email and
+        lives on only in the dashboard.
+
+    This is the key difference from naive "email everything overdue, every
+    day" logic: a document that expired long ago (e.g. 1227 days) is past
+    every overdue threshold, so it stops nagging entirely.
+    """
+    pre = set(reminder_days)
+    post = set(overdue_reminder_days or [])
+    out: list[Item] = []
+    for i in items:
+        d = i.days_left
+        if d >= 0 and d in pre:
+            out.append(i)
+        elif d < 0 and -d in post:
+            out.append(i)
+    return out

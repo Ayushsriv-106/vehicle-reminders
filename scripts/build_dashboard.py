@@ -626,7 +626,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   </div>
 
   <footer>
-    <div>Built from <code>data/vehicles.yaml</code> · Deployed via GitHub Pages</div>
+    <div>Built from your fleet sheet · Deployed via GitHub Pages</div>
     <div id="generated-at"></div>
   </footer>
 </div>

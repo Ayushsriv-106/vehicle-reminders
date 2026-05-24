@@ -36,9 +36,13 @@ import urllib.request
 from typing import Any
 
 
-# ---- Reminder defaults (same as the old YAML settings) ---- #
+# ---- Reminder defaults ---- #
+# Quiet by design: only mail on these few days around an expiry, never daily.
+#   reminder_days          -> days BEFORE expiry (the "week or two" warning ramp)
+#   overdue_reminder_days  -> days AFTER expiry, then it goes silent (dashboard only)
 DEFAULT_SETTINGS = {
-    "reminder_days": [60, 30, 15, 7, 3, 1, 0],
+    "reminder_days": [14, 7, 3, 1, 0],
+    "overdue_reminder_days": [1, 3, 7, 14, 30],
     "timezone": "Asia/Kolkata",
 }
 
