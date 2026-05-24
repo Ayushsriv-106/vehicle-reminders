@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import date
 from pathlib import Path
 
@@ -76,6 +77,33 @@ def _item_to_json(i: Item) -> dict:
     }
 
 
+def _vehicle_issues(vehicle: dict, v_items: list[Item]) -> list[dict]:
+    """Automated data-quality review of one vehicle's record. Each issue is
+    {level: error|warn|info, text}. Mirrors the manual review so the flags stay
+    visible on the dashboard instead of living only in a chat."""
+    issues: list[dict] = []
+    reg = (vehicle.get("registration_number") or "").strip()
+    owner = (vehicle.get("owner") or "").strip()
+    name = (vehicle.get("name") or "").strip()
+    note = (vehicle.get("notes") or "").strip()
+    docs = [i for i in v_items if i.category == "document"]
+
+    if not reg or re.search(r"x{2,}", reg, re.I):
+        issues.append({"level": "error", "text": "Registration looks like a placeholder — needs the real number"})
+    if not docs:
+        issues.append({"level": "error", "text": "No documents on record at all"})
+    if not owner or "tbd" in owner.lower() or "[" in owner:
+        issues.append({"level": "warn", "text": "Owner not finalised"})
+    if any(i.urgency == "overdue" for i in v_items) and re.search(r"soon|expiring", note, re.I):
+        issues.append({"level": "warn", "text": 'Note says "expiring soon" but a paper is already overdue — note is stale'})
+    if re.match(r"^(motor car|commercial vehicle|vehicle)\b", name, re.I) or name.lower() == "school bus":
+        issues.append({"level": "info", "text": "Generic name — replace with the actual make/model"})
+    ins = [i for i in docs if i.type == "Insurance"]
+    if ins and all(i.amount is None for i in ins):
+        issues.append({"level": "info", "text": "Insurance premium amount missing"})
+    return issues
+
+
 def build_dashboard(output_path: str | Path = "docs/index.html") -> None:
     config = load_config()
     items = build_items(config)
@@ -84,7 +112,9 @@ def build_dashboard(output_path: str | Path = "docs/index.html") -> None:
     # ---------- Vehicle cards (with compliance) ---------- #
     vehicles_data = []
     missing_report = []
+    review_report = []
     missing_required_total = 0
+    issues_total = 0
     for v in vehicles:
         v_items = [i for i in items if i.vehicle_id == v["id"]]
         present_types = {i.type for i in v_items if i.category == "document"}
@@ -94,7 +124,10 @@ def build_dashboard(output_path: str | Path = "docs/index.html") -> None:
         present_required = [d for d in required if d in present_types]
         compliance_pct = round(100 * len(present_required) / len(required)) if required else 100
         grp = owner_group(v.get("owner", ""))
+        issues = _vehicle_issues(v, v_items)
+        issues_total += len(issues)
         vehicles_data.append({
+            "issues": issues,
             "id": v["id"],
             "name": v["name"],
             "registration_number": v.get("registration_number", ""),
@@ -119,6 +152,13 @@ def build_dashboard(output_path: str | Path = "docs/index.html") -> None:
                 "owner_group": grp,
                 "vehicle_type": v.get("type", ""),
                 "missing": missing,
+            })
+        if issues:
+            review_report.append({
+                "vehicle_name": v["name"],
+                "registration_number": v.get("registration_number", ""),
+                "owner_group": grp,
+                "issues": issues,
             })
 
     # ---------- Stats ---------- #
@@ -160,6 +200,8 @@ def build_dashboard(output_path: str | Path = "docs/index.html") -> None:
         "spend_by_type": spend_by_type,
         "vehicles": vehicles_data,
         "missing_report": missing_report,
+        "review_report": review_report,
+        "issues_total": issues_total,
         "all_items": [_item_to_json(i) for i in items],
     }
 
@@ -303,6 +345,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .gap-card { background:var(--card); border:1px solid var(--line); border-left:4px solid var(--bad); border-radius:14px; padding:16px 18px; box-shadow:var(--shadow); }
   .gap-card .g-name { font-weight:600; }
   .gap-card .g-reg { font-family:"JetBrains Mono",monospace; font-size:12px; color:var(--ink-muted); margin:2px 0 10px; }
+  .issue-card { border-left-color:var(--warn); }
+  .issue-line { display:flex; gap:8px; align-items:flex-start; font-size:13px; padding:5px 0; }
+  .issue-dot { width:8px; height:8px; border-radius:50%; flex:none; margin-top:6px; }
+  .lvl-error { background:var(--bad); } .lvl-warn { background:var(--warn); } .lvl-info { background:var(--brand-3); }
+  .issue-badges { margin-top:10px; display:flex; flex-wrap:wrap; gap:6px; }
+  .issue-badge { font-size:10.5px; padding:3px 8px; border-radius:999px; border:1px solid var(--line); color:var(--ink-soft); display:inline-flex; gap:5px; align-items:center; }
 
   /* Fleet filter pills -------------------------------------------------- */
   .fleet-tabs, .tabs { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:18px; }
@@ -429,6 +477,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <div class="section fade-in" id="gaps-section">
     <div class="section-head"><h2>Compliance gaps</h2><div class="meta" id="gaps-meta"></div></div>
     <div class="gaps-grid" id="gaps-grid"></div>
+  </div>
+
+  <!-- Data review (automated record check) -->
+  <div class="section fade-in" id="review-section">
+    <div class="section-head"><h2>Data review</h2><div class="meta" id="review-meta"></div></div>
+    <div class="gaps-grid" id="review-grid"></div>
   </div>
 
   <!-- Fleets -->
@@ -570,6 +624,20 @@ function formatINR(n){
     </div>`).join('');
 })();
 
+/* ---------- Data review section ---------- */
+(function(){
+  const r=DATA.review_report||[];
+  const meta=document.getElementById('review-meta');
+  meta.textContent = r.length ? (DATA.issues_total+' issue(s) across '+r.length+' vehicle(s)') : 'no issues found';
+  if(!r.length){ document.getElementById('review-grid').innerHTML='<div class="empty">✅ No data-quality issues detected in the records.</div>'; return; }
+  document.getElementById('review-grid').innerHTML = r.map(v=>`
+    <div class="gap-card issue-card">
+      <div class="g-name">${v.vehicle_name}</div>
+      <div class="g-reg">${v.registration_number||'—'} · ${v.owner_group}</div>
+      ${v.issues.map(it=>`<div class="issue-line"><span class="issue-dot lvl-${it.level}"></span><span>${it.text}</span></div>`).join('')}
+    </div>`).join('');
+})();
+
 /* ---------- File button ---------- */
 function fileBtnHtml(it){
   const f = fileMap[it.key];
@@ -610,6 +678,10 @@ function renderFleets(){
         <div class="missing-row"><span class="missing-label">Missing</span>
           ${v.missing.map(m=>`<span class="status-pill" style="background:${DATA.doc_colors[m]||'#db2777'}">${m}</span>`).join('')}
         </div>` : '';
+      const issues = (v.issues&&v.issues.length) ? `
+        <div class="issue-badges">
+          ${v.issues.map(it=>`<span class="issue-badge"><span class="issue-dot lvl-${it.level}"></span>${it.text}</span>`).join('')}
+        </div>` : '';
       return `
         <div class="vehicle-card fade-in">
           <div class="vehicle-head">
@@ -623,6 +695,7 @@ function renderFleets(){
             </div>
           </div>
           ${missing}
+          ${issues}
           <ul class="doc-list">${docs || '<li class="doc-item" style="color:var(--ink-muted)">No papers on record yet.</li>'}</ul>
           ${v.notes?`<div class="veh-note">📝 ${v.notes}</div>`:''}
         </div>`;
@@ -692,6 +765,7 @@ document.addEventListener('click',e=>{
 fileInput.addEventListener('change',async()=>{
   const file=fileInput.files[0]; if(!file||!pendingUpload) return;
   const {key,vid,dtype,btn}=pendingUpload;
+  if(file.size > 12*1024*1024){ alert('That file is '+(file.size/1048576).toFixed(1)+' MB — please upload a scan under 12 MB.'); pendingUpload=null; return; }
   btn.classList.add('uploading'); btn.textContent='… uploading';
   try{
     const dataBase64=await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(String(r.result).split(',')[1]);r.onerror=rej;r.readAsDataURL(file);});

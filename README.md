@@ -8,8 +8,18 @@ The dashboard is the source of truth. It rebuilds and redeploys every day and al
 It includes:
 - **Fleet grouping** by owner (GJMS School / G.B. Automobiles / Family & Personal), with search and per-fleet / per-status filters.
 - **Compliance rings + gap flags** — each vehicle shows how many of its *legally required* papers are on record (cars: Insurance/PUC/RC; commercial: + Fitness/Permit/Road Tax), and a "Compliance gaps" section lists every missing paper.
-- **Document locker** — upload a scan to any paper and download it later. Needs a one-time Google Apps Script setup ([apps-script/README.md](apps-script/README.md)).
+- **Data review** — an automated record check flags placeholder registrations, missing owners, stale notes, generic names and missing premium amounts, colour-coded by severity.
+- **Document locker** — upload a scan to any paper and download it later.
 - **Renewal calendar (.ics)** export and a print/PDF view.
+
+## Hosting & team access
+
+Two ways to host it:
+
+1. **GitHub Pages** (public, read-only) — the default; the workflow deploys here.
+2. **Cloudflare Pages** (recommended for teams) — puts the whole dashboard behind a **shared ID + password** and enables **upload/download** of scans, stored in Cloudflare KV. Set-up: [cloudflare/README.md](cloudflare/README.md). The Cloudflare Functions live in [`functions/`](functions/).
+
+Either way the data pipeline and reminder email stay on GitHub Actions.
 
 ## How reminders work
 
@@ -34,8 +44,10 @@ Tune the cadence in the `settings` block — either the Google Sheet defaults (`
 | `scripts/test_core.py` | Tests for the reminder-selection rules |
 | `data/vehicles.yaml` | Fallback data + default settings (sheet wins when configured) |
 | `.github/workflows/reminders.yml` | Daily cron, dashboard build, email, Pages deploy |
-| `apps-script/Code.gs` | Google Apps Script web app powering upload/download |
-| `apps-script/README.md` | One-time setup for the document locker |
+| `functions/_middleware.js` | Cloudflare shared ID/password gate |
+| `functions/api/files.js` | Cloudflare upload/download/list API (KV-backed) |
+| `cloudflare/README.md` | Cloudflare Pages hosting + login setup (recommended) |
+| `apps-script/` | Alternative locker backend (Google Drive) if not using Cloudflare |
 
 ## Run locally
 

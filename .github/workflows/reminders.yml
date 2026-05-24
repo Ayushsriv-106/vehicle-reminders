@@ -63,6 +63,13 @@ jobs:
           DASHBOARD_URL: ${{ vars.DASHBOARD_URL }}
         run: python scripts/send_reminders.py
 
+      # Trigger a fresh Cloudflare Pages build daily (it rebuilds from the sheet
+      # on its own, so days-left stays current). Set repo variable CF_DEPLOY_HOOK
+      # to your Pages deploy-hook URL to enable. See cloudflare/README.md.
+      - name: Refresh Cloudflare Pages
+        if: ${{ vars.CF_DEPLOY_HOOK != '' }}
+        run: curl -fsS -X POST "${{ vars.CF_DEPLOY_HOOK }}" || echo "deploy hook ping failed (non-fatal)"
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
