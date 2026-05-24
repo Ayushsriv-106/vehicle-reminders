@@ -93,6 +93,39 @@ def classify_urgency(days_left: int) -> str:
     return "far"
 
 
+# ---------- Compliance: which papers each vehicle type legally needs -------- #
+
+# Indian RTO requirements (document-wise). Private cars need valid insurance,
+# PUC and RC; commercial/transport vehicles additionally need an annual fitness
+# certificate, a permit and road tax.
+REQUIRED_DOCS: dict[str, list[str]] = {
+    "Car": ["Insurance", "PUC", "Registration (RC)"],
+    "Commercial Vehicle": [
+        "Insurance", "PUC", "Fitness", "Permit", "Registration (RC)", "Road Tax",
+    ],
+}
+DEFAULT_REQUIRED = ["Insurance", "PUC", "Registration (RC)"]
+
+
+def required_docs_for(vehicle_type: str) -> list[str]:
+    return REQUIRED_DOCS.get((vehicle_type or "").strip(), DEFAULT_REQUIRED)
+
+
+def missing_required(present_types: set[str], vehicle_type: str) -> list[str]:
+    """Required documents that aren't present for this vehicle, in canonical order."""
+    return [d for d in required_docs_for(vehicle_type) if d not in present_types]
+
+
+def owner_group(owner: str) -> str:
+    """Bucket a free-text owner string into one of the three real fleets."""
+    o = (owner or "").lower()
+    if any(k in o for k in ("gopal", "memorial", "g.m.s", "gms", "school")):
+        return "GJMS School"
+    if any(k in o for k in ("g.b", "gb auto", "automobile")):
+        return "G.B. Automobiles"
+    return "Family & Personal"
+
+
 def _make_service_item(vehicle: dict, service: dict, today: date) -> Item | None:
     """Compute next-due date for a service from last_done + interval_months."""
     last_done = service.get("last_done")

@@ -46,6 +46,8 @@ jobs:
       - name: Build dashboard
         env:
           SHEET_CSV_URL: ${{ secrets.SHEET_CSV_URL }}
+          DOC_API_URL: ${{ vars.DOC_API_URL }}
+          DOC_API_TOKEN: ${{ vars.DOC_API_TOKEN }}
         run: python scripts/build_dashboard.py
 
       - name: Send reminder email

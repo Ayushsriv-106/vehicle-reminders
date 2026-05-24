@@ -5,6 +5,12 @@ Automated vehicle document reminders — a live dashboard plus a deliberately qu
 **Dashboard:** https://ayushsriv-106.github.io/vehicle-reminders/
 The dashboard is the source of truth. It rebuilds and redeploys every day and always shows the full picture — every vehicle, every document, overdue items in red.
 
+It includes:
+- **Fleet grouping** by owner (GJMS School / G.B. Automobiles / Family & Personal), with search and per-fleet / per-status filters.
+- **Compliance rings + gap flags** — each vehicle shows how many of its *legally required* papers are on record (cars: Insurance/PUC/RC; commercial: + Fitness/Permit/Road Tax), and a "Compliance gaps" section lists every missing paper.
+- **Document locker** — upload a scan to any paper and download it later. Needs a one-time Google Apps Script setup ([apps-script/README.md](apps-script/README.md)).
+- **Renewal calendar (.ics)** export and a print/PDF view.
+
 ## How reminders work
 
 Data lives in a Google Sheet (published as CSV, wired in via the `SHEET_CSV_URL` secret). A GitHub Actions job runs daily, rebuilds the dashboard, and sends **at most one summary email** — but only on a handful of days around each expiry, so it never turns into daily spam:
@@ -28,6 +34,8 @@ Tune the cadence in the `settings` block — either the Google Sheet defaults (`
 | `scripts/test_core.py` | Tests for the reminder-selection rules |
 | `data/vehicles.yaml` | Fallback data + default settings (sheet wins when configured) |
 | `.github/workflows/reminders.yml` | Daily cron, dashboard build, email, Pages deploy |
+| `apps-script/Code.gs` | Google Apps Script web app powering upload/download |
+| `apps-script/README.md` | One-time setup for the document locker |
 
 ## Run locally
 
@@ -50,3 +58,4 @@ Set in the repo's Actions secrets:
 - `SHEET_CSV_URL` — published Google Sheet CSV link
 - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `EMAIL_FROM`, `EMAIL_TO` — mail delivery
 - `DASHBOARD_URL` *(optional variable)* — link used in the email button; falls back to the GitHub Pages URL if unset.
+- `DOC_API_URL`, `DOC_API_TOKEN` *(optional variables)* — the Apps Script web-app URL + token for the document locker. Without them, Upload buttons are shown disabled. See [apps-script/README.md](apps-script/README.md).

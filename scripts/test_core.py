@@ -7,7 +7,14 @@ from __future__ import annotations
 import sys
 from datetime import date, timedelta
 
-from core import build_items, classify_urgency, items_needing_email
+from core import (
+    build_items,
+    classify_urgency,
+    items_needing_email,
+    missing_required,
+    owner_group,
+    required_docs_for,
+)
 
 REMINDER_DAYS = [14, 7, 3, 1, 0]
 OVERDUE_DAYS = [1, 3, 7, 14, 30]
@@ -80,6 +87,27 @@ def run() -> int:
     check("negative days = overdue", classify_urgency(-1) == "overdue")
     check("<=7 days = critical", classify_urgency(5) == "critical")
     check("<=30 days = warning", classify_urgency(20) == "warning")
+
+    # --- compliance: required docs + missing detection --- #
+    check("commercial vehicles require a Permit",
+          "Permit" in required_docs_for("Commercial Vehicle"))
+    check("cars do NOT require a Permit",
+          "Permit" not in required_docs_for("Car"))
+    check("school bus with only Insurance+RC is missing Permit/PUC/Fitness/Road Tax",
+          set(missing_required({"Insurance", "Registration (RC)"}, "Commercial Vehicle"))
+          == {"PUC", "Fitness", "Permit", "Road Tax"})
+    check("fully-papered car has no gaps",
+          missing_required({"Insurance", "PUC", "Registration (RC)"}, "Car") == [])
+    check("missing list preserves canonical order",
+          missing_required(set(), "Car") == ["Insurance", "PUC", "Registration (RC)"])
+
+    # --- owner -> fleet bucketing --- #
+    check("Gopal Ji owner -> GJMS School",
+          owner_group("Gopal Ji Memorial School") == "GJMS School")
+    check("G.B. Automobiles owner -> G.B. Automobiles",
+          owner_group("M/S G.B. Automobiles") == "G.B. Automobiles")
+    check("unknown owner -> Family & Personal",
+          owner_group("Ashok Kumar") == "Family & Personal")
 
     if failures:
         print(f"FAIL: {len(failures)} test(s) failed:")

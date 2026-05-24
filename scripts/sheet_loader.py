@@ -109,8 +109,9 @@ def _row_to_vehicle(row: dict[str, str]) -> dict | None:
         ("Insurance", "insurance_expiry", "insurance_provider", "insurance_amount", "insurance_file"),
         ("PUC",       "puc_expiry",        None,                "puc_amount",        "puc_file"),
         ("Registration (RC)", "rc_expiry", None,                None,                "rc_file"),
-        ("Fitness",   "fitness_expiry",    None,                None,                None),
-        ("Road Tax",  "road_tax_expiry",   None,                None,                None),
+        ("Fitness",   "fitness_expiry",    None,                None,                "fitness_file"),
+        ("Permit",    "permit_expiry",     None,                None,                "permit_file"),
+        ("Road Tax",  "road_tax_expiry",   None,                None,                "road_tax_file"),
     ]
     for dtype, exp_col, prov_col, amt_col, file_col in doc_specs:
         expiry = _clean(row.get(exp_col, ""))
