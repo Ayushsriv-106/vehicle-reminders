@@ -178,10 +178,14 @@ def build_items(config: dict, today: date | None = None) -> list[Item]:
     return items
 
 
+MONTHLY_PERIOD_DAYS = 30
+
+
 def items_needing_email(
     items: list[Item],
     reminder_days: list[int],
     overdue_reminder_days: list[int] | None = None,
+    monthly_after_days: int | None = None,
 ) -> list[Item]:
     """Pick the items worth emailing about today — deliberately quiet so the
     daily mail never feels like spam.
@@ -189,20 +193,33 @@ def items_needing_email(
     An item is emailed only on a few discrete days:
       * ``reminder_days`` — exact days *before* expiry (e.g. 14, 7, 3, 1, 0).
       * ``overdue_reminder_days`` — exact days *after* expiry (e.g. 1, 3, 7,
-        14, 30). After the last of these the item goes silent in email and
-        lives on only in the dashboard.
+        14, 30) — a ramp of nudges right after a lapse.
+      * ``monthly_after_days`` — once an item is overdue by *more* than this,
+        send a low-frequency "still overdue" heartbeat every 30 days
+        (60, 90, 120 … days overdue). Set to ``None`` to disable, in which
+        case chronically-overdue items go fully silent and live on only in
+        the dashboard.
 
-    This is the key difference from naive "email everything overdue, every
-    day" logic: a document that expired long ago (e.g. 1227 days) is past
-    every overdue threshold, so it stops nagging entirely.
+    The key difference from naive "email everything overdue, every day" logic:
+    nothing is emailed daily. A heartbeat at most nudges monthly, so a long
+    lapse is never forgotten without becoming spam.
     """
     pre = set(reminder_days)
     post = set(overdue_reminder_days or [])
     out: list[Item] = []
     for i in items:
         d = i.days_left
-        if d >= 0 and d in pre:
+        if d >= 0:
+            if d in pre:
+                out.append(i)
+            continue
+        overdue = -d
+        if overdue in post:
             out.append(i)
-        elif d < 0 and -d in post:
+        elif (
+            monthly_after_days is not None
+            and overdue > monthly_after_days
+            and overdue % MONTHLY_PERIOD_DAYS == 0
+        ):
             out.append(i)
     return out

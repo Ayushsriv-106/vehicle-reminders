@@ -10,11 +10,12 @@ The dashboard is the source of truth. It rebuilds and redeploys every day and al
 Data lives in a Google Sheet (published as CSV, wired in via the `SHEET_CSV_URL` secret). A GitHub Actions job runs daily, rebuilds the dashboard, and sends **at most one summary email** — but only on a handful of days around each expiry, so it never turns into daily spam:
 
 - **Before expiry:** `reminder_days` — emails on 14, 7, 3, 1 and 0 days before.
-- **After expiry:** `overdue_reminder_days` — nudges on 1, 3, 7, 14 and 30 days overdue, then **goes silent**.
+- **After expiry:** `overdue_reminder_days` — a short ramp of nudges on 1, 3, 7, 14 and 30 days overdue.
+- **Chronically overdue:** `overdue_monthly_after_days` — past this many days overdue (30), a low-frequency "still overdue" heartbeat fires every 30 days (60, 90, 120 …) so a real lapse is never forgotten.
 
-A document that expired long ago (say 1227 days) is past every overdue threshold, so it stops emailing entirely — it just stays visible on the dashboard. On days when nothing is in those windows, no email is sent at all.
+Nothing is ever emailed daily. On days when no item is in any of those windows, no email is sent at all. To make chronic items go *fully silent* (dashboard only) instead of the monthly heartbeat, set `overdue_monthly_after_days` to `null`.
 
-Tune the cadence by editing the `settings` block — either in the Google Sheet defaults (`scripts/sheet_loader.py` → `DEFAULT_SETTINGS`) or the `data/vehicles.yaml` fallback. For example, to keep nagging chronic lapses, add a far value like `90` to `overdue_reminder_days`.
+Tune the cadence in the `settings` block — either the Google Sheet defaults (`scripts/sheet_loader.py` → `DEFAULT_SETTINGS`) or the `data/vehicles.yaml` fallback.
 
 ## Layout
 

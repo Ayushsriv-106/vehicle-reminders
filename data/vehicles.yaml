@@ -5,8 +5,11 @@
 settings:
   # Days BEFORE expiry to send a reminder (the "week or two" warning ramp).
   reminder_days: [14, 7, 3, 1, 0]
-  # Days AFTER expiry to nudge, then it goes silent in email (stays on dashboard).
+  # Days AFTER expiry to nudge (a short ramp right after a lapse).
   overdue_reminder_days: [1, 3, 7, 14, 30]
+  # Past this many days overdue, send only a monthly "still overdue" heartbeat.
+  # Set to null to go fully silent instead (item then lives only on the dashboard).
+  overdue_monthly_after_days: 30
   timezone: "Asia/Kolkata"
 
 vehicles: []

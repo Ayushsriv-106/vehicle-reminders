@@ -146,9 +146,10 @@ def main() -> int:
     settings = config.get("settings", {})
     reminder_days = settings.get("reminder_days", [14, 7, 3, 1, 0])
     overdue_reminder_days = settings.get("overdue_reminder_days", [1, 3, 7, 14, 30])
+    monthly_after_days = settings.get("overdue_monthly_after_days", 30)
 
     items = build_items(config)
-    due = items_needing_email(items, reminder_days, overdue_reminder_days)
+    due = items_needing_email(items, reminder_days, overdue_reminder_days, monthly_after_days)
 
     if not due:
         print("✅ Nothing to remind about today. Skipping email.")

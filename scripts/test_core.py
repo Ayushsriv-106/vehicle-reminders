@@ -11,6 +11,7 @@ from core import build_items, classify_urgency, items_needing_email
 
 REMINDER_DAYS = [14, 7, 3, 1, 0]
 OVERDUE_DAYS = [1, 3, 7, 14, 30]
+MONTHLY_AFTER = 30
 
 
 def _doc(days_from_today: int) -> dict:
@@ -27,9 +28,9 @@ def _doc(days_from_today: int) -> dict:
     }
 
 
-def _emails_on(days_from_today: int) -> bool:
+def _emails_on(days_from_today: int, monthly_after: int | None = MONTHLY_AFTER) -> bool:
     items = build_items(_doc(days_from_today))
-    due = items_needing_email(items, REMINDER_DAYS, OVERDUE_DAYS)
+    due = items_needing_email(items, REMINDER_DAYS, OVERDUE_DAYS, monthly_after)
     return len(due) == 1
 
 
@@ -40,10 +41,12 @@ def run() -> int:
         if not cond:
             failures.append(label)
 
-    # --- The actual spam complaint: long-overdue items must go SILENT --- #
-    check("1227d-overdue PUC must NOT email (was daily spam)", not _emails_on(-1227))
-    check("265d-overdue insurance must NOT email (was daily spam)", not _emails_on(-265))
-    check("31d overdue (just past grace) must NOT email", not _emails_on(-31))
+    # --- The actual spam complaint: NO long-overdue item emails DAILY --- #
+    # (1227 and 265 aren't 30-day multiples, so they're silent on those days;
+    #  the monthly heartbeat catches them on the next multiple of 30.)
+    check("1227d-overdue PUC must NOT email today (was daily spam)", not _emails_on(-1227))
+    check("265d-overdue insurance must NOT email today (was daily spam)", not _emails_on(-265))
+    check("31d overdue (just past grace, not a heartbeat day) must NOT email", not _emails_on(-31))
 
     # --- Capped post-expiry nudges DO fire on their exact days --- #
     for d in OVERDUE_DAYS:
@@ -60,6 +63,18 @@ def run() -> int:
     check("10d out must NOT email (between 14 and 7)", not _emails_on(10))
     check("5d out must NOT email (between 7 and 3)", not _emails_on(5))
     check("20d overdue must NOT email (between 14 and 30)", not _emails_on(-20))
+
+    # --- Monthly "still overdue" heartbeat (every 30 days past grace) --- #
+    check("60d overdue should email (heartbeat)", _emails_on(-60))
+    check("90d overdue should email (heartbeat)", _emails_on(-90))
+    check("270d overdue should email (heartbeat — catches the bus insurance)", _emails_on(-270))
+    check("45d overdue must NOT email (between heartbeats)", not _emails_on(-45))
+    check("50d overdue must NOT email (between heartbeats)", not _emails_on(-50))
+
+    # --- Heartbeat disabled -> chronic overdue goes fully silent --- #
+    check("60d overdue silent when monthly disabled", not _emails_on(-60, monthly_after=None))
+    check("90d overdue silent when monthly disabled", not _emails_on(-90, monthly_after=None))
+    check("but 7d overdue still emails when monthly disabled", _emails_on(-7, monthly_after=None))
 
     # --- urgency classification sanity --- #
     check("negative days = overdue", classify_urgency(-1) == "overdue")

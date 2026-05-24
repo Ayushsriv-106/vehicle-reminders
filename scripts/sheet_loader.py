@@ -38,11 +38,15 @@ from typing import Any
 
 # ---- Reminder defaults ---- #
 # Quiet by design: only mail on these few days around an expiry, never daily.
-#   reminder_days          -> days BEFORE expiry (the "week or two" warning ramp)
-#   overdue_reminder_days  -> days AFTER expiry, then it goes silent (dashboard only)
+#   reminder_days              -> days BEFORE expiry (the "week or two" warning ramp)
+#   overdue_reminder_days      -> days AFTER expiry — a short ramp of nudges
+#   overdue_monthly_after_days -> past this many days overdue, nudge only every
+#                                 30 days (a "still overdue" heartbeat). Set to
+#                                 None to instead go fully silent (dashboard only).
 DEFAULT_SETTINGS = {
     "reminder_days": [14, 7, 3, 1, 0],
     "overdue_reminder_days": [1, 3, 7, 14, 30],
+    "overdue_monthly_after_days": 30,
     "timezone": "Asia/Kolkata",
 }
 
