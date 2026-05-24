@@ -1,21 +1,18 @@
-# Cloudflare Pages config for the gated dashboard + document locker.
-# Used if you deploy with `wrangler pages deploy`; if you connect the repo via
-# the Cloudflare dashboard (recommended, see cloudflare/README.md) set the same
-# build output, KV binding and variables there instead.
+# Cloudflare Pages config — used by the GitHub Actions deploy
+# (.github/workflows/reminders.yml runs `wrangler pages deploy docs`).
+# Setup steps: cloudflare/README.md
 
 name = "garage-fleet"
 pages_build_output_dir = "docs"
 compatibility_date = "2024-11-01"
 
-# KV namespace that stores uploaded document scans. Create it once
-#   (Workers & Pages → KV → Create namespace), then paste its id here
-#   OR bind it in the Pages project settings as variable name DOCS.
+# Document scans are stored in this KV namespace ("garage-docs"), bound as DOCS
+# so functions/api/files.js can read/write them. This binding is applied to the
+# Pages project on every `wrangler pages deploy`.
 [[kv_namespaces]]
 binding = "DOCS"
-id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+id = "f1d8fa7f5b3542bdaccc25fe7d183a6f"
 
-# Runtime variables are set in the Pages project (Settings → Variables), not here,
-# so secrets stay out of git:
-#   AUTH_USER, AUTH_PASS  - the shared login (mark as secret)
-#   DOC_API_URL           - set to  /api/files   (build-time, so the page calls the API)
-#   SHEET_CSV_URL         - your published sheet CSV (build-time)
+# Runtime login is set as Pages *secrets* by the deploy workflow (AUTH_USER /
+# AUTH_PASS), so they never live in this committed file.
+# DOC_API_URL is baked into the page at build time (set in the workflow), not here.

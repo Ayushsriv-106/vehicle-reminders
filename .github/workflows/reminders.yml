@@ -2,34 +2,32 @@ name: Vehicle Reminders
 
 on:
   schedule:
-    # 08:30 IST daily = 03:00 UTC
+    # 08:30 IST daily = 03:00 UTC — rebuild (fresh "days left") + send the digest
     - cron: "0 3 * * *"
-  # Rebuild dashboard on every push to main
   push:
     branches: [main]
     paths:
       - "data/**"
       - "scripts/**"
+      - "functions/**"
+      - "wrangler.toml"
       - ".github/workflows/**"
-  # Allow manual runs from the Actions tab (handy for testing)
   workflow_dispatch:
     inputs:
       skip_email:
-        description: "Skip sending email (dashboard only)"
+        description: "Skip sending the reminder email"
         type: boolean
         default: false
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
-  group: "pages"
+  group: "vehicle-reminders-${{ github.ref }}"
   cancel-in-progress: false
 
 jobs:
-  reminders:
+  build-deploy-email:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,18 +38,46 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
+      - name: Set up Node (for wrangler)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
       - name: Install deps
         run: pip install -r requirements.txt
 
+      # Build the static dashboard. DOC_API_URL=/api/files makes the page call the
+      # Cloudflare Function for uploads/downloads (same origin, behind the login).
       - name: Build dashboard
         env:
           SHEET_CSV_URL: ${{ secrets.SHEET_CSV_URL }}
-          DOC_API_URL: ${{ vars.DOC_API_URL }}
-          DOC_API_TOKEN: ${{ vars.DOC_API_TOKEN }}
+          DOC_API_URL: "/api/files"
         run: python scripts/build_dashboard.py
 
+      # Deploy to Cloudflare Pages (project + KV binding from wrangler.toml).
+      # Runs only once CLOUDFLARE_ACCOUNT_ID (variable) + CLOUDFLARE_API_TOKEN
+      # (secret) are set — see cloudflare/README.md. Until then it's skipped so
+      # the email still goes out and runs stay green.
+      - name: Deploy to Cloudflare Pages
+        if: ${{ vars.CLOUDFLARE_ACCOUNT_ID != '' }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          AUTH_USER: ${{ secrets.AUTH_USER }}
+          AUTH_PASS: ${{ secrets.AUTH_PASS }}
+        run: |
+          set -e
+          WR="npx --yes wrangler@3"
+          # Create the project if it doesn't exist yet (ignore "already exists").
+          $WR pages project create garage-fleet --production-branch=main || true
+          # Shared login (whole site is gated by functions/_middleware.js).
+          printf '%s' "$AUTH_USER" | $WR pages secret put AUTH_USER --project-name=garage-fleet
+          printf '%s' "$AUTH_PASS" | $WR pages secret put AUTH_PASS --project-name=garage-fleet
+          # Deploy static assets + Functions; KV binding (DOCS) comes from wrangler.toml.
+          $WR pages deploy docs --project-name=garage-fleet --branch=main --commit-dirty=true
+
       - name: Send reminder email
-        if: ${{ github.event.inputs.skip_email != 'true' }}
+        if: ${{ always() && github.event.inputs.skip_email != 'true' }}
         env:
           SHEET_CSV_URL: ${{ secrets.SHEET_CSV_URL }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
@@ -62,26 +88,3 @@ jobs:
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
           DASHBOARD_URL: ${{ vars.DASHBOARD_URL }}
         run: python scripts/send_reminders.py
-
-      # Trigger a fresh Cloudflare Pages build daily (it rebuilds from the sheet
-      # on its own, so days-left stays current). Set repo variable CF_DEPLOY_HOOK
-      # to your Pages deploy-hook URL to enable. See cloudflare/README.md.
-      - name: Refresh Cloudflare Pages
-        if: ${{ vars.CF_DEPLOY_HOOK != '' }}
-        run: curl -fsS -X POST "${{ vars.CF_DEPLOY_HOOK }}" || echo "deploy hook ping failed (non-fatal)"
-
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: docs
-
-  deploy-pages:
-    needs: reminders
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4

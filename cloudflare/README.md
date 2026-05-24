@@ -1,90 +1,67 @@
-# Host the gated dashboard on Cloudflare Pages
+# Gated dashboard on Cloudflare Pages (auto-deployed from GitHub)
 
-This puts the dashboard behind one **shared ID + password** and turns on
-**upload/download** of document scans (stored in Cloudflare KV). Your data
-pipeline and the reminder email stay on GitHub Actions — only the *hosting +
-login + uploads* move here. ~15 minutes, one time.
+The dashboard is hosted on **Cloudflare Pages**, behind one **shared ID + password**,
+with **upload/download** of document scans stored in Cloudflare **KV**.
 
-## What you get
-- `https://garage-fleet.pages.dev` (or your domain) asking for an ID/password.
-- Team members enter the shared login once; they can then **view and upload**
-  scans on any paper.
-- Files live in Cloudflare KV; links also flow into the dashboard.
+**You do NOT click through the Cloudflare Pages UI.** GitHub Actions builds the
+site (reusing the `SHEET_CSV_URL` already in the repo) and deploys it to Cloudflare
+with `wrangler` on every push and once a day. You just provide a token + a few
+secrets, one time.
 
----
+## One-time setup (~5 minutes)
 
-## 1. Create the KV namespace (file storage)
-Cloudflare dashboard → **Workers & Pages → KV → Create namespace** → name it
-`garage-docs`. (No credit card needed.)
+Already done for you: the KV namespace **`garage-docs`**
+(`id f1d8fa7f5b3542bdaccc25fe7d183a6f`) exists and is referenced in
+[`wrangler.toml`](../wrangler.toml). Account ID is `49e5cf64cedbc22dec20ee3684269970`.
 
-## 2. Create the Pages project (Git integration)
-1. **Workers & Pages → Create → Pages → Connect to Git** → pick the
-   `vehicle-reminders` repo.
-2. Build settings:
-   - **Framework preset:** None
-   - **Build command:** `pip install -r requirements.txt && python scripts/build_dashboard.py`
-   - **Build output directory:** `docs`
-3. **Save and Deploy** (the first build may warn about missing env vars — that's
-   fine, we add them next).
+### 1. Create a Cloudflare API token
+Cloudflare dashboard → **My Profile → API Tokens → Create Token → Create Custom Token**:
+- **Permissions** (add both rows):
+  - `Account` · `Cloudflare Pages` · **Edit**
+  - `Account` · `Workers KV Storage` · **Edit**
+- **Account Resources**: Include → your account.
+- Create, then **copy the token** (shown once).
 
-## 3. Bind KV + set variables
-In the new Pages project → **Settings**:
+### 2. Add GitHub repo secrets + a variable
+Repo → **Settings → Secrets and variables → Actions**.
 
-**Functions → KV namespace bindings → Add binding**
-| Variable name | KV namespace |
-|---|---|
-| `DOCS` | `garage-docs` |
-
-**Variables and Secrets** (Production) — add:
-| Name | Value | Type |
-|---|---|---|
-| `AUTH_USER` | the shared username you want | Secret |
-| `AUTH_PASS` | the shared password you want | Secret |
-| `DOC_API_URL` | `/api/files` | Plaintext |
-| `SHEET_CSV_URL` | your published Google Sheet CSV link | Secret |
-
-Then **Deployments → Retry deployment** so the build picks up the variables.
-
-> Keep `AUTH_USER` / `AUTH_PASS` ASCII (plain letters/numbers). They gate the
-> whole site, including uploads.
-
-## 4. Daily refresh (keeps "days left" current)
-Pages → **Settings → Builds & deployments → Deploy hooks → Add deploy hook**
-(branch `main`). Copy the URL, then in **GitHub → repo Settings → Secrets and
-variables → Actions → Variables**, add:
+**Secrets** (New repository secret):
 | Name | Value |
-|---|---|
-| `CF_DEPLOY_HOOK` | the deploy-hook URL |
+|------|-------|
+| `CLOUDFLARE_API_TOKEN` | the token from step 1 |
+| `AUTH_USER` | the shared username (e.g. `fleet`) |
+| `AUTH_PASS` | the shared password (e.g. `Garage-Reoti-7K9m`) |
 
-The daily GitHub Actions run will now ping it so Cloudflare rebuilds with fresh
-dates. (`.github/workflows/reminders.yml` already has this step.)
+**Variables** (the Variables tab — not secret):
+| Name | Value |
+|------|-------|
+| `CLOUDFLARE_ACCOUNT_ID` | `49e5cf64cedbc22dec20ee3684269970` |
 
-## 5. Point the reminder email at the new site
-GitHub repo **Variables** → set `DASHBOARD_URL` to your Pages URL
-(e.g. `https://garage-fleet.pages.dev`). The daily email button now opens the
-gated dashboard.
+### 3. Run it
+**Actions → Vehicle Reminders → Run workflow** (or just push any commit). The job:
+builds the dashboard → creates the `garage-fleet` Pages project (first run) →
+sets the `AUTH_USER`/`AUTH_PASS` login → deploys assets + the Functions, with the
+`DOCS` KV binding from `wrangler.toml`.
 
-## 6. Turn off the old public site
-The old GitHub Pages site is unauthenticated. Once Cloudflare works:
-**repo Settings → Pages → Source → None** (or delete the `deploy-pages` job).
+Your site goes live at **`https://garage-fleet.pages.dev`** and asks for the
+ID/password. Log in → view the fleet, upload/download scans on any paper.
 
----
+### 4. Lock down the old public copy
+The previous GitHub Pages site is unauthenticated. Disable it:
+**repo Settings → Pages → Build and deployment → Source → None**.
+(The email now links to the Cloudflare site by default.)
 
 ## How it works
-- `functions/_middleware.js` — checks the shared ID/password on every request
-  (the browser's native login prompt). Nothing is served without it.
-- `functions/api/files.js` — the locker API, backed by the `DOCS` KV namespace:
-  - `GET /api/files` → list of uploaded files
-  - `GET /api/files?get=<key>` → streams a file
-  - `POST /api/files` → upload / delete
-- The dashboard calls `/api/files` (same origin), so the shared login also
-  protects uploads — no separate token needed.
+- `functions/_middleware.js` — gates every request with the shared ID/password.
+- `functions/api/files.js` — upload/download/list, backed by the `DOCS` KV namespace.
+- The dashboard calls `/api/files` (same origin), so the login also protects uploads.
+- `.github/workflows/reminders.yml` builds with `DOC_API_URL=/api/files` and deploys
+  via `wrangler pages deploy` on push + daily cron.
 
-## Notes & limits
-- KV stores each scan as base64; **max ~12 MB per file** (the upload button
-  enforces this). Plenty for PDFs/photos of documents.
-- To rotate the password: change `AUTH_PASS` and redeploy.
-- `wrangler.toml` in the repo root mirrors this config if you prefer
-  `wrangler pages deploy` over Git integration.
-- This replaces the Google Apps Script option in `apps-script/` — you only need
-  one. Cloudflare is the chosen path; `apps-script/` is kept as an alternative.
+## Notes
+- Each scan is stored as base64 in KV; **max ~12 MB per file** (enforced in the UI).
+- Rotate the password: change the `AUTH_PASS` secret and re-run the workflow.
+- Custom domain: add it in the Pages project, then set the `DASHBOARD_URL` repo
+  variable so the email links to it.
+- If the `DOCS` KV binding ever doesn't apply, bind it once in the Pages project
+  (Settings → Bindings → KV → `DOCS` → `garage-docs`); the workflow keeps it after.

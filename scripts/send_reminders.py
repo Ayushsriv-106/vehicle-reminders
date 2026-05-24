@@ -21,9 +21,10 @@ URGENCY_META = {
     "warning":  {"emoji": "🟡", "label": "Upcoming", "color": "#d4a017"},
 }
 
-# Live GitHub Pages dashboard — used when the DASHBOARD_URL env/var isn't set,
-# so the email always has a working "Open full dashboard" button.
-DEFAULT_DASHBOARD_URL = "https://ayushsriv-106.github.io/vehicle-reminders/"
+# Live dashboard — used when the DASHBOARD_URL env/var isn't set, so the email
+# always has a working "Open full dashboard" button. Points at the gated
+# Cloudflare site (set DASHBOARD_URL to override, e.g. a custom domain).
+DEFAULT_DASHBOARD_URL = "https://garage-fleet.pages.dev/"
 
 
 def _fmt_days(days: int) -> str:

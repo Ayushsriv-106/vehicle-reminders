@@ -14,12 +14,13 @@ It includes:
 
 ## Hosting & team access
 
-Two ways to host it:
+The dashboard is hosted on **Cloudflare Pages**, behind a **shared ID + password**,
+with working **upload/download** of scans (stored in Cloudflare KV). GitHub Actions
+builds it and deploys via `wrangler` on every push + daily — no Cloudflare UI
+click-through. One-time setup (an API token + a few secrets): [cloudflare/README.md](cloudflare/README.md).
+The login + upload Functions live in [`functions/`](functions/).
 
-1. **GitHub Pages** (public, read-only) — the default; the workflow deploys here.
-2. **Cloudflare Pages** (recommended for teams) — puts the whole dashboard behind a **shared ID + password** and enables **upload/download** of scans, stored in Cloudflare KV. Set-up: [cloudflare/README.md](cloudflare/README.md). The Cloudflare Functions live in [`functions/`](functions/).
-
-Either way the data pipeline and reminder email stay on GitHub Actions.
+The reminder email continues to run from the same GitHub Actions workflow.
 
 ## How reminders work
 
@@ -69,5 +70,8 @@ Set in the repo's Actions secrets:
 
 - `SHEET_CSV_URL` — published Google Sheet CSV link
 - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `EMAIL_FROM`, `EMAIL_TO` — mail delivery
-- `DASHBOARD_URL` *(optional variable)* — link used in the email button; falls back to the GitHub Pages URL if unset.
-- `DOC_API_URL`, `DOC_API_TOKEN` *(optional variables)* — the Apps Script web-app URL + token for the document locker. Without them, Upload buttons are shown disabled. See [apps-script/README.md](apps-script/README.md).
+
+For the Cloudflare deploy (see [cloudflare/README.md](cloudflare/README.md)):
+- `CLOUDFLARE_API_TOKEN` *(secret)*, `AUTH_USER` *(secret)*, `AUTH_PASS` *(secret)* — deploy token + the shared login.
+- `CLOUDFLARE_ACCOUNT_ID` *(variable)* — enables the deploy step.
+- `DASHBOARD_URL` *(optional variable)* — link used in the email button; defaults to the Cloudflare site.
