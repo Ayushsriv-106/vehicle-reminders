@@ -1,9 +1,17 @@
-"""Builds docs/index.html — a vibrant static dashboard deployed to GitHub Pages.
+"""Builds docs/index.html — a clean, professional, single-file fleet-documents
+dashboard deployed to Cloudflare Pages.
 
-The page is self-contained (no build step). The actual document scans are an
-optional overlay: if a DOC_API_URL (an Apps Script web app) is configured, the
-page fetches a file map at view time and shows download buttons, plus lets you
-upload a scan straight from the browser.
+Design goals (rebuilt 2026-06-13):
+  * Light, neutral, business look. Colour is used ONLY to signal status
+    (red = overdue, amber = expiring, green = valid, grey = neutral) — never
+    decoration. No gradients, no rainbow per-document colours.
+  * Validation front-and-centre: missing legally-required papers and data-quality
+    issues are surfaced prominently.
+  * A ready-to-post WhatsApp reminder for the "Car papers" group is auto-composed
+    on every build, with one-tap Share + Copy.
+
+The page is self-contained (no build step). Document scans are an overlay served
+by the Cloudflare Function at DOC_API_URL (/api/files), behind the shared login.
 """
 from __future__ import annotations
 
@@ -16,6 +24,7 @@ from pathlib import Path
 from core import (
     Item,
     build_items,
+    compose_whatsapp_reminder,
     load_config,
     missing_required,
     owner_group,
@@ -23,26 +32,14 @@ from core import (
 )
 
 
-# Vibrant, semantic status palette (overdue → far).
+# Functional status palette — tinted background, readable text, subtle border.
 URGENCY_META = {
-    "overdue":  {"label": "Overdue",   "color": "#e11d48", "rank": 0},
-    "critical": {"label": "Urgent",    "color": "#f97316", "rank": 1},
-    "warning":  {"label": "Upcoming",  "color": "#eab308", "rank": 2},
-    "ok":       {"label": "Scheduled", "color": "#22c55e", "rank": 3},
-    "far":      {"label": "Later",     "color": "#64748b", "rank": 4},
+    "overdue":  {"label": "Overdue",   "rank": 0, "fg": "#b42318", "bg": "#fef3f2", "bd": "#fecdca"},
+    "critical": {"label": "Urgent",    "rank": 1, "fg": "#b54708", "bg": "#fff6ed", "bd": "#fdd9b5"},
+    "warning":  {"label": "Due soon",  "rank": 2, "fg": "#a16207", "bg": "#fefce8", "bd": "#fde68a"},
+    "ok":       {"label": "Valid",     "rank": 3, "fg": "#067647", "bg": "#ecfdf3", "bd": "#abefc6"},
+    "far":      {"label": "Valid",     "rank": 4, "fg": "#475467", "bg": "#f2f4f7", "bd": "#e4e7ec"},
 }
-
-# Each document type gets its own colour so the page reads at a glance.
-DOC_COLORS = {
-    "Insurance":        "#2563eb",
-    "PUC":              "#16a34a",
-    "Fitness":          "#9333ea",
-    "Permit":           "#db2777",
-    "Registration (RC)":"#0891b2",
-    "Road Tax":         "#d97706",
-    "General Service":  "#475569",
-}
-DEFAULT_DOC_COLOR = "#475569"
 
 
 def _fmt_days(days: int) -> str:
@@ -56,20 +53,20 @@ def _fmt_days(days: int) -> str:
 
 
 def _item_to_json(i: Item) -> dict:
+    m = URGENCY_META[i.urgency]
     return {
         "key": f"{i.vehicle_id}|{i.type}",
         "vehicle_id": i.vehicle_id,
         "vehicle_name": i.vehicle_name,
         "category": i.category,
         "type": i.type,
-        "type_color": DOC_COLORS.get(i.type, DEFAULT_DOC_COLOR),
         "expiry_date": i.expiry_date.isoformat(),
         "expiry_display": i.expiry_date.strftime("%d %b %Y"),
         "days_left": i.days_left,
         "days_display": _fmt_days(i.days_left),
         "urgency": i.urgency,
-        "urgency_label": URGENCY_META[i.urgency]["label"],
-        "urgency_color": URGENCY_META[i.urgency]["color"],
+        "urgency_label": m["label"],
+        "u_fg": m["fg"], "u_bg": m["bg"], "u_bd": m["bd"],
         "provider": i.provider,
         "amount": i.amount,
         "file_link": i.file_link,
@@ -77,10 +74,9 @@ def _item_to_json(i: Item) -> dict:
     }
 
 
-def _vehicle_issues(vehicle: dict, v_items: list[Item]) -> list[dict]:
+def _vehicle_issues(vehicle: dict, v_items: list[Item], reg_counts: dict[str, int]) -> list[dict]:
     """Automated data-quality review of one vehicle's record. Each issue is
-    {level: error|warn|info, text}. Mirrors the manual review so the flags stay
-    visible on the dashboard instead of living only in a chat."""
+    {level: error|warn|info, text}."""
     issues: list[dict] = []
     reg = (vehicle.get("registration_number") or "").strip()
     owner = (vehicle.get("owner") or "").strip()
@@ -90,8 +86,12 @@ def _vehicle_issues(vehicle: dict, v_items: list[Item]) -> list[dict]:
 
     if not reg or re.search(r"x{2,}", reg, re.I):
         issues.append({"level": "error", "text": "Registration looks like a placeholder — needs the real number"})
+    elif reg_counts.get(reg.upper().replace(" ", ""), 0) > 1:
+        issues.append({"level": "error", "text": f"Registration {reg} is recorded on more than one vehicle — check for a duplicate"})
     if not docs:
         issues.append({"level": "error", "text": "No documents on record at all"})
+    if any(i.type == "Insurance" and i.days_left < 0 for i in docs):
+        issues.append({"level": "error", "text": "Insurance has lapsed — vehicle may be running uninsured"})
     if not owner or "tbd" in owner.lower() or "[" in owner:
         issues.append({"level": "warn", "text": "Owner not finalised"})
     if any(i.urgency == "overdue" for i in v_items) and re.search(r"soon|expiring", note, re.I):
@@ -109,7 +109,13 @@ def build_dashboard(output_path: str | Path = "docs/index.html") -> None:
     items = build_items(config)
     vehicles = config.get("vehicles", [])
 
-    # ---------- Vehicle cards (with compliance) ---------- #
+    # Registration frequency for duplicate detection.
+    reg_counts: dict[str, int] = {}
+    for v in vehicles:
+        r = (v.get("registration_number") or "").strip().upper().replace(" ", "")
+        if r and not re.search(r"X{2,}", r):
+            reg_counts[r] = reg_counts.get(r, 0) + 1
+
     vehicles_data = []
     missing_report = []
     review_report = []
@@ -124,7 +130,7 @@ def build_dashboard(output_path: str | Path = "docs/index.html") -> None:
         present_required = [d for d in required if d in present_types]
         compliance_pct = round(100 * len(present_required) / len(required)) if required else 100
         grp = owner_group(v.get("owner", ""))
-        issues = _vehicle_issues(v, v_items)
+        issues = _vehicle_issues(v, v_items, reg_counts)
         issues_total += len(issues)
         vehicles_data.append({
             "issues": issues,
@@ -152,6 +158,7 @@ def build_dashboard(output_path: str | Path = "docs/index.html") -> None:
                 "owner_group": grp,
                 "vehicle_type": v.get("type", ""),
                 "missing": missing,
+                "has_any": bool(present_types),
             })
         if issues:
             review_report.append({
@@ -161,7 +168,9 @@ def build_dashboard(output_path: str | Path = "docs/index.html") -> None:
                 "issues": issues,
             })
 
-    # ---------- Stats ---------- #
+    # Most-broken first in the gaps list.
+    missing_report.sort(key=lambda m: (m["has_any"], -len(m["missing"])))
+
     stats = {
         "vehicles": len(vehicles),
         "total_items": len(items),
@@ -170,6 +179,7 @@ def build_dashboard(output_path: str | Path = "docs/index.html") -> None:
         "warning": sum(1 for i in items if i.urgency == "warning"),
         "ok": sum(1 for i in items if i.urgency in ("ok", "far")),
         "missing_required": missing_required_total,
+        "data_issues": issues_total,
         "annual_spend": sum(
             (i.amount or 0) for i in items
             if i.category == "document" and i.amount
@@ -179,21 +189,23 @@ def build_dashboard(output_path: str | Path = "docs/index.html") -> None:
     status_counts = {k: sum(1 for i in items if i.urgency == k)
                      for k in ("overdue", "critical", "warning", "ok", "far")}
 
-    # ---------- Timeline (next 12 months) ---------- #
     timeline = [_item_to_json(i) for i in items if 0 <= i.days_left <= 365]
 
-    # ---------- Spend by type ---------- #
     spend_by_type: dict[str, float] = {}
     for i in items:
         if i.amount:
             spend_by_type[i.type] = spend_by_type.get(i.type, 0) + i.amount
+
+    dashboard_url = os.environ.get("DASHBOARD_URL", "").strip() or "https://garage-fleet.pages.dev/"
+    whatsapp_message = compose_whatsapp_reminder(config, items, dashboard_url=dashboard_url)
 
     payload = {
         "generated_at": date.today().isoformat(),
         "generated_display": date.today().strftime("%A, %d %B %Y"),
         "doc_api_url": os.environ.get("DOC_API_URL", "").strip(),
         "doc_api_token": os.environ.get("DOC_API_TOKEN", "").strip(),
-        "doc_colors": DOC_COLORS,
+        "dashboard_url": dashboard_url,
+        "whatsapp_message": whatsapp_message,
         "stats": stats,
         "status_counts": status_counts,
         "timeline": timeline,
@@ -208,11 +220,11 @@ def build_dashboard(output_path: str | Path = "docs/index.html") -> None:
     html = HTML_TEMPLATE.replace("__DATA__", json.dumps(payload, indent=2))
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     Path(output_path).write_text(html, encoding="utf-8")
-    print(f"✅ Dashboard built at {output_path} ({len(vehicles)} vehicles, {len(items)} items)")
+    print(f"Dashboard built at {output_path} ({len(vehicles)} vehicles, {len(items)} items)")
 
 
 # =========================================================================== #
-# HTML template — vibrant, single-file, no build step
+# HTML template — clean, light, professional, single-file
 # =========================================================================== #
 
 HTML_TEMPLATE = r"""<!DOCTYPE html>
@@ -220,267 +232,250 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>The Garage — Fleet Papers</title>
+<title>Fleet Document Register</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
   :root {
-    --bg: #0b1020;
-    --bg-2: #11172e;
-    --card: #161d38;
-    --card-2: #1b2342;
-    --ink: #f3f5ff;
-    --ink-soft: #c2c8e6;
-    --ink-muted: #8390bd;
-    --line: #28315a;
-    --brand-1: #6366f1;   /* indigo */
-    --brand-2: #ec4899;   /* pink   */
-    --brand-3: #06b6d4;   /* cyan   */
-    --good: #22c55e;
-    --warn: #eab308;
-    --bad: #e11d48;
-    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 18px 40px -12px rgba(0,0,0,.55);
-    --grad-hero: linear-gradient(115deg,#6366f1 0%,#a855f7 38%,#ec4899 70%,#f97316 100%);
+    --bg: #f4f5f7;
+    --surface: #ffffff;
+    --surface-2: #f8f9fb;
+    --ink: #101828;
+    --ink-2: #344054;
+    --muted: #667085;
+    --line: #e4e7ec;
+    --line-strong: #d0d5dd;
+    --accent: #3538cd;        /* single brand accent — indigo */
+    --accent-soft: #eef0fb;
+    --red: #b42318; --red-bg:#fef3f2; --red-bd:#fecdca;
+    --org: #b54708; --org-bg:#fff6ed; --org-bd:#fdd9b5;
+    --amb: #a16207; --amb-bg:#fefce8; --amb-bd:#fde68a;
+    --grn: #067647; --grn-bg:#ecfdf3; --grn-bd:#abefc6;
+    --gry: #475467; --gry-bg:#f2f4f7; --gry-bd:#e4e7ec;
+    --shadow: 0 1px 2px rgba(16,24,40,.04), 0 1px 3px rgba(16,24,40,.06);
+    --shadow-md: 0 1px 2px rgba(16,24,40,.04), 0 4px 12px -4px rgba(16,24,40,.10);
   }
   * { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; }
+  html, body { margin:0; padding:0; }
   body {
-    background:
-      radial-gradient(1200px 600px at 12% -8%, rgba(99,102,241,.22), transparent 60%),
-      radial-gradient(1000px 500px at 100% 0%, rgba(236,72,153,.16), transparent 55%),
-      var(--bg);
-    color: var(--ink);
+    background: var(--bg); color: var(--ink);
     font-family: "Inter", -apple-system, system-ui, sans-serif;
-    font-size: 15px; line-height: 1.55;
-    -webkit-font-smoothing: antialiased;
+    font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased;
   }
-  a { color: inherit; }
-  .wrap { max-width: 1320px; margin: 0 auto; padding: 32px 28px 90px; }
-  @media (max-width: 640px) { .wrap { padding: 20px 16px 64px; } }
+  a { color: var(--accent); text-decoration: none; }
+  .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 0 24px 80px; }
+  @media (max-width:640px){ .wrap{ padding:0 14px 56px; } }
 
-  /* Hero ---------------------------------------------------------------- */
-  .hero {
-    position: relative; overflow: hidden;
-    border-radius: 22px; padding: 34px 34px 30px;
-    background: var(--grad-hero);
-    box-shadow: var(--shadow);
-    margin-bottom: 26px;
-  }
-  .hero::after {
-    content:""; position:absolute; inset:0;
-    background: radial-gradient(600px 300px at 85% 120%, rgba(255,255,255,.25), transparent 60%);
-    pointer-events:none;
-  }
-  .hero-top { display:flex; justify-content:space-between; align-items:flex-start; gap:18px; flex-wrap:wrap; position:relative; z-index:1; }
-  .hero .eyebrow {
-    font-family:"JetBrains Mono",monospace; font-size:11px; letter-spacing:.22em;
-    text-transform:uppercase; color:rgba(255,255,255,.85); margin-bottom:8px;
-  }
-  .hero h1 {
-    font-family:"Space Grotesk",sans-serif; font-weight:700;
-    font-size: clamp(34px, 6vw, 58px); line-height:.98; letter-spacing:-.02em;
-    margin:0; color:#fff; text-shadow:0 2px 20px rgba(0,0,0,.18);
-  }
-  .hero .date { font-family:"JetBrains Mono",monospace; font-size:13px; color:#fff; text-align:right; }
-  .hero .date small { display:block; color:rgba(255,255,255,.8); font-size:11px; letter-spacing:.1em; text-transform:uppercase; margin-top:4px; }
+  /* Topbar -------------------------------------------------------------- */
+  .topbar { background: var(--surface); border-bottom: 1px solid var(--line); margin-bottom: 24px; }
+  .topbar-in { max-width:1240px; margin:0 auto; padding:18px 24px; display:flex; justify-content:space-between; align-items:center; gap:16px; flex-wrap:wrap; }
+  @media (max-width:640px){ .topbar-in{ padding:14px; } }
+  .brand { display:flex; align-items:center; gap:12px; }
+  .brand .mark { width:34px; height:34px; border-radius:8px; background:var(--accent); color:#fff; display:grid; place-items:center; font-weight:700; font-size:16px; flex:none; }
+  .brand h1 { font-size:17px; font-weight:600; margin:0; letter-spacing:-.01em; }
+  .brand .sub { font-size:12px; color:var(--muted); margin-top:1px; }
+  .topbar .date { font-size:12px; color:var(--muted); text-align:right; }
+  .topbar .date b { color:var(--ink-2); font-weight:600; }
 
   /* Toolbar ------------------------------------------------------------- */
-  .toolbar { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:22px; position:relative; z-index:1; }
-  .search {
-    flex:1 1 280px; display:flex; align-items:center; gap:8px;
-    background:rgba(255,255,255,.16); border:1px solid rgba(255,255,255,.28);
-    border-radius:12px; padding:10px 14px; backdrop-filter: blur(6px);
-  }
-  .search input { flex:1; background:transparent; border:none; outline:none; color:#fff; font-size:14px; }
-  .search input::placeholder { color:rgba(255,255,255,.75); }
-  .btn {
-    border:1px solid rgba(255,255,255,.32); background:rgba(255,255,255,.16);
-    color:#fff; border-radius:12px; padding:10px 16px; font-size:13px; font-weight:600;
-    cursor:pointer; display:inline-flex; align-items:center; gap:7px; backdrop-filter: blur(6px);
-    transition: transform .12s ease, background .15s;
-  }
-  .btn:hover { background:rgba(255,255,255,.28); transform:translateY(-1px); }
+  .toolbar { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:22px; }
+  .search { flex:1 1 260px; display:flex; align-items:center; gap:8px; background:var(--surface); border:1px solid var(--line-strong); border-radius:9px; padding:9px 12px; box-shadow:var(--shadow); }
+  .search svg { flex:none; color:var(--muted); }
+  .search input { flex:1; background:transparent; border:none; outline:none; color:var(--ink); font-size:14px; }
+  .btn { border:1px solid var(--line-strong); background:var(--surface); color:var(--ink-2); border-radius:9px; padding:9px 14px; font-size:13px; font-weight:600; cursor:pointer; display:inline-flex; align-items:center; gap:7px; box-shadow:var(--shadow); transition:background .12s, border-color .12s; }
+  .btn:hover { background:var(--surface-2); border-color:var(--muted); }
+  .btn.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .btn.primary:hover { background:#2a2da8; }
+  .btn.wa { background:#1ea463; border-color:#1ea463; color:#fff; }
+  .btn.wa:hover { background:#17854f; }
 
   /* KPI strip ----------------------------------------------------------- */
-  .kpis { display:grid; grid-template-columns:repeat(7,1fr); gap:12px; margin-bottom:28px; }
-  @media (max-width:1100px){ .kpis{ grid-template-columns:repeat(4,1fr);} }
-  @media (max-width:640px){ .kpis{ grid-template-columns:repeat(2,1fr);} }
-  .kpi {
-    background:var(--card); border:1px solid var(--line); border-radius:16px;
-    padding:16px 16px 15px; position:relative; overflow:hidden; box-shadow:var(--shadow);
-  }
-  .kpi::before { content:""; position:absolute; left:0; top:0; height:100%; width:4px; background:var(--accent,#6366f1); }
-  .kpi .k-label { font-family:"JetBrains Mono",monospace; font-size:10px; letter-spacing:.13em; text-transform:uppercase; color:var(--ink-muted); margin-bottom:8px; }
-  .kpi .k-value { font-family:"Space Grotesk",sans-serif; font-size:30px; font-weight:700; line-height:1; }
-  .kpi .k-sub { font-size:11px; color:var(--ink-muted); margin-top:6px; }
+  .kpis { display:grid; grid-template-columns:repeat(6,1fr); gap:12px; margin-bottom:24px; }
+  @media (max-width:1000px){ .kpis{ grid-template-columns:repeat(3,1fr);} }
+  @media (max-width:560px){ .kpis{ grid-template-columns:repeat(2,1fr);} }
+  .kpi { background:var(--surface); border:1px solid var(--line); border-radius:11px; padding:14px 15px; box-shadow:var(--shadow); }
+  .kpi .k-label { font-size:11px; font-weight:600; letter-spacing:.02em; text-transform:uppercase; color:var(--muted); margin-bottom:7px; }
+  .kpi .k-value { font-size:26px; font-weight:700; line-height:1; letter-spacing:-.02em; }
+  .kpi .k-sub { font-size:11px; color:var(--muted); margin-top:5px; }
+  .kpi.alert { border-color:var(--red-bd); background:var(--red-bg); }
+  .kpi.alert .k-value { color:var(--red); }
 
-  /* Banner -------------------------------------------------------------- */
-  .banner {
-    border-radius:16px; padding:18px 22px; margin-bottom:26px; color:#fff;
-    background:linear-gradient(100deg,#e11d48,#f97316); box-shadow:var(--shadow);
-    display:flex; gap:18px; align-items:center; justify-content:space-between; flex-wrap:wrap;
-  }
-  .banner h3 { margin:0 0 2px; font-family:"Space Grotesk",sans-serif; font-size:18px; }
-  .banner .b-list { font-size:13.5px; opacity:.95; }
-  .banner .b-list b { font-weight:700; }
+  /* Cards / sections ---------------------------------------------------- */
+  .card { background:var(--surface); border:1px solid var(--line); border-radius:12px; box-shadow:var(--shadow); }
+  .section { margin-bottom:28px; }
+  .section-head { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:13px; gap:12px; flex-wrap:wrap; }
+  .section-head h2 { font-size:16px; font-weight:600; margin:0; letter-spacing:-.01em; }
+  .section-head .meta { font-size:12px; color:var(--muted); }
 
-  /* Sections ------------------------------------------------------------ */
-  .section { margin-bottom:34px; }
-  .section-head { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:16px; gap:12px; flex-wrap:wrap; }
-  .section-head h2 { font-family:"Space Grotesk",sans-serif; font-weight:600; font-size:22px; margin:0; letter-spacing:-.01em; }
-  .section-head .meta { font-family:"JetBrains Mono",monospace; font-size:11px; letter-spacing:.12em; text-transform:uppercase; color:var(--ink-muted); }
+  /* WhatsApp reminder card --------------------------------------------- */
+  .wa-card { padding:18px 20px; border-left:4px solid #1ea463; }
+  .wa-head { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:12px; }
+  .wa-head h2 { font-size:16px; font-weight:600; margin:0; display:flex; align-items:center; gap:9px; }
+  .wa-head .pill-note { font-size:11.5px; color:var(--muted); }
+  .wa-actions { display:flex; gap:8px; flex-wrap:wrap; }
+  .wa-msg { background:var(--surface-2); border:1px solid var(--line); border-radius:9px; padding:14px 16px; font-size:13px; line-height:1.55; white-space:pre-wrap; color:var(--ink-2); max-height:300px; overflow:auto; }
+  .wa-msg b { color:var(--ink); }
 
   /* Charts -------------------------------------------------------------- */
-  .charts { display:grid; grid-template-columns:1.5fr 1fr 1fr; gap:16px; }
-  @media (max-width:980px){ .charts{ grid-template-columns:1fr;} }
-  .chart-card { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:18px 18px 14px; box-shadow:var(--shadow); }
-  .chart-card h3 { font-family:"Space Grotesk",sans-serif; font-size:15px; margin:0 0 2px; }
-  .chart-card .sub { font-family:"JetBrains Mono",monospace; font-size:10px; letter-spacing:.12em; text-transform:uppercase; color:var(--ink-muted); margin-bottom:14px; }
-  .chart-wrap { height:240px; position:relative; }
+  .charts { display:grid; grid-template-columns:1.6fr 1fr 1fr; gap:14px; }
+  @media (max-width:920px){ .charts{ grid-template-columns:1fr;} }
+  .chart-card { padding:16px 16px 12px; }
+  .chart-card h3 { font-size:13.5px; font-weight:600; margin:0 0 2px; }
+  .chart-card .sub { font-size:11px; color:var(--muted); margin-bottom:12px; }
+  .chart-wrap { height:210px; position:relative; }
 
-  /* Compliance gaps ----------------------------------------------------- */
-  .gaps-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:14px; }
-  .gap-card { background:var(--card); border:1px solid var(--line); border-left:4px solid var(--bad); border-radius:14px; padding:16px 18px; box-shadow:var(--shadow); }
-  .gap-card .g-name { font-weight:600; }
-  .gap-card .g-reg { font-family:"JetBrains Mono",monospace; font-size:12px; color:var(--ink-muted); margin:2px 0 10px; }
-  .issue-card { border-left-color:var(--warn); }
-  .issue-line { display:flex; gap:8px; align-items:flex-start; font-size:13px; padding:5px 0; }
-  .issue-dot { width:8px; height:8px; border-radius:50%; flex:none; margin-top:6px; }
-  .lvl-error { background:var(--bad); } .lvl-warn { background:var(--warn); } .lvl-info { background:var(--brand-3); }
-  .issue-badges { margin-top:10px; display:flex; flex-wrap:wrap; gap:6px; }
-  .issue-badge { font-size:10.5px; padding:3px 8px; border-radius:999px; border:1px solid var(--line); color:var(--ink-soft); display:inline-flex; gap:5px; align-items:center; }
+  /* Gaps / review ------------------------------------------------------- */
+  .gaps-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(290px,1fr)); gap:12px; }
+  .gap-card { background:var(--surface); border:1px solid var(--line); border-left:3px solid var(--red); border-radius:10px; padding:14px 16px; box-shadow:var(--shadow); }
+  .gap-card.warn-card { border-left-color:var(--amb); }
+  .gap-card .g-name { font-weight:600; font-size:14px; }
+  .gap-card .g-reg { font-size:12px; color:var(--muted); margin:2px 0 9px; }
+  .issue-line { display:flex; gap:8px; align-items:flex-start; font-size:12.5px; padding:4px 0; color:var(--ink-2); }
+  .issue-dot { width:7px; height:7px; border-radius:50%; flex:none; margin-top:6px; }
+  .lvl-error{ background:var(--red);} .lvl-warn{ background:var(--amb);} .lvl-info{ background:var(--muted);}
 
-  /* Fleet filter pills -------------------------------------------------- */
-  .fleet-tabs, .tabs { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:18px; }
-  .pill-btn {
-    font-family:"JetBrains Mono",monospace; font-size:11px; letter-spacing:.08em; text-transform:uppercase;
-    padding:8px 14px; border-radius:999px; border:1px solid var(--line); background:var(--card);
-    color:var(--ink-soft); cursor:pointer; transition:all .15s;
-  }
-  .pill-btn:hover { border-color:var(--brand-1); color:#fff; }
-  .pill-btn.active { background:linear-gradient(100deg,var(--brand-1),var(--brand-2)); color:#fff; border-color:transparent; }
+  /* Pills / tabs -------------------------------------------------------- */
+  .tabs { display:flex; gap:7px; flex-wrap:wrap; margin-bottom:15px; }
+  .pill-btn { font-size:12.5px; font-weight:500; padding:7px 13px; border-radius:8px; border:1px solid var(--line-strong); background:var(--surface); color:var(--ink-2); cursor:pointer; transition:all .12s; }
+  .pill-btn:hover { border-color:var(--muted); }
+  .pill-btn.active { background:var(--accent); border-color:var(--accent); color:#fff; }
 
-  /* Vehicle cards ------------------------------------------------------- */
-  .fleet-group { margin-bottom:30px; }
-  .fleet-group h3.fleet-title { font-family:"Space Grotesk",sans-serif; font-size:16px; margin:0 0 14px; display:flex; align-items:center; gap:10px; }
-  .fleet-title .dot { width:10px; height:10px; border-radius:50%; }
-  .vehicles-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(330px,1fr)); gap:16px; }
-  .vehicle-card { background:var(--card); border:1px solid var(--line); border-radius:18px; padding:20px; box-shadow:var(--shadow); position:relative; transition:transform .15s ease, border-color .15s; }
-  .vehicle-card:hover { transform:translateY(-3px); border-color:var(--brand-1); }
+  /* Status pill (functional colour) ------------------------------------ */
+  .status-pill { font-size:11px; font-weight:600; padding:3px 9px; border-radius:6px; white-space:nowrap; border:1px solid transparent; }
+  .doc-pill { font-size:11px; font-weight:600; padding:2px 8px; border-radius:6px; background:var(--accent-soft); color:var(--accent); white-space:nowrap; }
+
+  /* Fleet groups + vehicle cards --------------------------------------- */
+  .fleet-group { margin-bottom:26px; }
+  .fleet-title { font-size:13px; font-weight:600; margin:0 0 12px; display:flex; align-items:center; gap:9px; color:var(--ink-2); text-transform:uppercase; letter-spacing:.03em; }
+  .fleet-title .dot { width:8px; height:8px; border-radius:50%; }
+  .fleet-title .n { color:var(--muted); font-weight:500; }
+  .vehicles-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(320px,1fr)); gap:14px; }
+  .vehicle-card { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:17px 18px; box-shadow:var(--shadow); transition:box-shadow .14s, border-color .14s; }
+  .vehicle-card:hover { box-shadow:var(--shadow-md); border-color:var(--line-strong); }
   .vehicle-head { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; }
-  .vehicle-name { font-family:"Space Grotesk",sans-serif; font-weight:600; font-size:18px; line-height:1.2; }
-  .vehicle-reg { font-family:"JetBrains Mono",monospace; font-size:12px; color:var(--ink-muted); margin:3px 0 0; letter-spacing:.04em; }
-  .vehicle-type-chip { font-family:"JetBrains Mono",monospace; font-size:9.5px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-soft); border:1px solid var(--line); border-radius:999px; padding:4px 9px; white-space:nowrap; }
+  .vehicle-name { font-weight:600; font-size:15px; line-height:1.25; }
+  .vehicle-reg { font-size:12px; color:var(--muted); margin-top:2px; }
+  .vehicle-type-chip { font-size:10.5px; font-weight:500; color:var(--muted); border:1px solid var(--line); border-radius:6px; padding:3px 8px; white-space:nowrap; }
 
-  /* Compliance ring */
-  .ring { --pct:0; width:46px; height:46px; border-radius:50%; flex:none;
-    background: conic-gradient(var(--ring-c) calc(var(--pct)*1%), rgba(255,255,255,.08) 0);
+  .ring { --pct:0; width:42px; height:42px; border-radius:50%; flex:none;
+    background: conic-gradient(var(--ring-c) calc(var(--pct)*1%), var(--line) 0);
     display:grid; place-items:center; position:relative; }
-  .ring::after { content:""; position:absolute; inset:5px; background:var(--card); border-radius:50%; }
-  .ring span { position:relative; z-index:1; font-family:"JetBrains Mono",monospace; font-size:11px; font-weight:600; }
+  .ring::after { content:""; position:absolute; inset:4px; background:var(--surface); border-radius:50%; }
+  .ring span { position:relative; z-index:1; font-size:10.5px; font-weight:700; }
 
-  .veh-note { font-size:12px; color:var(--ink-muted); margin:12px 0 0; font-style:italic; }
-  .missing-row { margin-top:12px; display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
-  .missing-label { font-size:11px; color:var(--bad); font-weight:600; text-transform:uppercase; letter-spacing:.06em; }
+  .veh-note { font-size:12px; color:var(--muted); margin:11px 0 0; }
+  .missing-row { margin-top:11px; display:flex; flex-wrap:wrap; gap:6px; align-items:center; padding:9px 10px; background:var(--red-bg); border:1px solid var(--red-bd); border-radius:8px; }
+  .missing-label { font-size:11px; color:var(--red); font-weight:700; text-transform:uppercase; letter-spacing:.03em; }
+  .miss-pill { font-size:11px; font-weight:600; padding:2px 8px; border-radius:6px; background:#fff; color:var(--red); border:1px solid var(--red-bd); }
+  .issue-badges { margin-top:9px; display:flex; flex-wrap:wrap; gap:6px; }
+  .issue-badge { font-size:10.5px; padding:3px 8px; border-radius:6px; border:1px solid var(--line); color:var(--ink-2); background:var(--surface-2); display:inline-flex; gap:5px; align-items:center; }
 
-  .doc-list { list-style:none; padding:0; margin:14px 0 0; }
-  .doc-item { display:grid; grid-template-columns:1fr auto; gap:8px 12px; padding:11px 0; border-top:1px solid var(--line); align-items:center; }
+  .doc-list { list-style:none; padding:0; margin:13px 0 0; }
+  .doc-item { display:grid; grid-template-columns:1fr auto; gap:6px 12px; padding:10px 0; border-top:1px solid var(--line); align-items:center; }
   .doc-item:first-child { border-top:none; }
-  .doc-left { display:flex; flex-direction:column; gap:4px; min-width:0; }
-  .doc-type { display:inline-flex; align-items:center; gap:7px; font-weight:600; font-size:13.5px; }
-  .doc-type .swatch { width:9px; height:9px; border-radius:3px; flex:none; }
-  .doc-exp { font-family:"JetBrains Mono",monospace; font-size:11px; color:var(--ink-muted); }
+  .doc-left { display:flex; flex-direction:column; gap:3px; min-width:0; }
+  .doc-type { font-weight:600; font-size:13px; }
+  .doc-type .prov { color:var(--muted); font-weight:400; font-size:12px; }
+  .doc-exp { font-size:11.5px; color:var(--muted); }
   .doc-right { display:flex; align-items:center; gap:8px; }
-  .status-pill { font-family:"JetBrains Mono",monospace; font-size:10px; letter-spacing:.06em; text-transform:uppercase; padding:4px 9px; border-radius:999px; font-weight:600; color:#fff; white-space:nowrap; }
-  .file-btn {
-    border:1px solid var(--line); background:var(--card-2); color:var(--ink-soft);
-    border-radius:9px; padding:5px 10px; font-size:11px; font-weight:600; cursor:pointer;
-    display:inline-flex; align-items:center; gap:5px; white-space:nowrap; transition:all .14s;
-  }
-  .file-btn:hover { border-color:var(--brand-3); color:#fff; }
-  .file-btn.has-file { border-color:var(--good); color:#bbf7d0; }
+  .file-btn { border:1px solid var(--line-strong); background:var(--surface); color:var(--ink-2); border-radius:7px; padding:4px 9px; font-size:11px; font-weight:600; cursor:pointer; display:inline-flex; align-items:center; gap:5px; white-space:nowrap; transition:all .12s; }
+  .file-btn:hover { border-color:var(--accent); color:var(--accent); }
+  .file-btn.has-file { border-color:var(--grn-bd); color:var(--grn); background:var(--grn-bg); }
   .file-btn.uploading { opacity:.6; pointer-events:none; }
   .file-btn.disabled { opacity:.5; cursor:not-allowed; }
 
   /* Table --------------------------------------------------------------- */
-  .table-wrap { overflow-x:auto; background:var(--card); border:1px solid var(--line); border-radius:16px; box-shadow:var(--shadow); }
-  table.tbl { width:100%; border-collapse:collapse; font-size:13.5px; min-width:760px; }
-  table.tbl thead { background:linear-gradient(100deg,var(--brand-1),var(--brand-2)); }
-  table.tbl th { text-align:left; padding:13px 16px; font-family:"JetBrains Mono",monospace; font-size:10px; letter-spacing:.13em; text-transform:uppercase; color:#fff; font-weight:600; }
-  table.tbl td { padding:12px 16px; border-top:1px solid var(--line); vertical-align:middle; }
-  table.tbl tr:hover td { background:rgba(99,102,241,.08); }
+  .table-wrap { overflow-x:auto; background:var(--surface); border:1px solid var(--line); border-radius:12px; box-shadow:var(--shadow); }
+  table.tbl { width:100%; border-collapse:collapse; font-size:13px; min-width:740px; }
+  table.tbl thead { background:var(--surface-2); }
+  table.tbl th { text-align:left; padding:11px 16px; font-size:11px; letter-spacing:.03em; text-transform:uppercase; color:var(--muted); font-weight:600; border-bottom:1px solid var(--line); }
+  table.tbl td { padding:11px 16px; border-top:1px solid var(--line); vertical-align:middle; }
+  table.tbl tr:hover td { background:var(--surface-2); }
   .td-veh { font-weight:600; }
-  .td-mono { font-family:"JetBrains Mono",monospace; font-size:12px; color:var(--ink-muted); }
+  .td-mut { color:var(--muted); }
 
-  footer { margin-top:50px; padding-top:22px; border-top:1px solid var(--line); font-family:"JetBrains Mono",monospace; font-size:11px; color:var(--ink-muted); display:flex; justify-content:space-between; flex-wrap:wrap; gap:10px; }
-
-  .empty { text-align:center; padding:40px; color:var(--ink-muted); }
+  footer { margin-top:46px; padding-top:20px; border-top:1px solid var(--line); font-size:12px; color:var(--muted); display:flex; justify-content:space-between; flex-wrap:wrap; gap:10px; }
+  .empty { text-align:center; padding:34px; color:var(--muted); }
   .hidden { display:none !important; }
 
-  /* Print --------------------------------------------------------------- */
   @media print {
-    body { background:#fff; color:#000; }
-    .toolbar, .file-btn, .fleet-tabs, .tabs, .btn, .search { display:none !important; }
-    .hero { background:#222 !important; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
-    .kpi, .vehicle-card, .chart-card, .gap-card, .table-wrap { box-shadow:none; border:1px solid #ccc; }
+    body { background:#fff; }
+    .toolbar,.file-btn,.tabs,.btn,.search,.wa-actions { display:none !important; }
+    .card,.kpi,.vehicle-card,.gap-card,.table-wrap { box-shadow:none; }
     .vehicle-card { break-inside:avoid; }
   }
-
-  .fade-in { animation: fadeIn .5s ease both; }
-  @keyframes fadeIn { from{opacity:0; transform:translateY(10px);} to{opacity:1; transform:none;} }
 </style>
 </head>
 <body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <div class="brand">
+      <div class="mark">F</div>
+      <div>
+        <h1>Fleet Document Register</h1>
+        <div class="sub">Insurance · PUC · Fitness · Permit · RC · Road Tax</div>
+      </div>
+    </div>
+    <div class="date">
+      <div><b id="today"></b></div>
+      <div>Auto-refreshed daily</div>
+    </div>
+  </div>
+</div>
+
 <div class="wrap">
 
-  <!-- Hero -->
-  <header class="hero fade-in">
-    <div class="hero-top">
-      <div>
-        <div class="eyebrow">Personal &amp; Business Fleet Register</div>
-        <h1>The Garage</h1>
-      </div>
-      <div class="date">
-        <div id="today"></div>
-        <small>Auto-refreshed daily</small>
-      </div>
+  <div class="toolbar">
+    <div class="search">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+      <input id="search" type="search" placeholder="Search vehicle, registration, document…" autocomplete="off" />
     </div>
-    <div class="toolbar">
-      <div class="search">
-        <span>🔎</span>
-        <input id="search" type="search" placeholder="Search vehicle, registration, document…" autocomplete="off" />
+    <button class="btn" id="btn-ics" title="Download a calendar of every renewal">Renewal calendar</button>
+    <button class="btn" id="btn-print" title="Print or save as PDF">Print</button>
+  </div>
+
+  <div class="kpis" id="kpis"></div>
+
+  <!-- WhatsApp reminder -->
+  <div class="section" id="wa-section">
+    <div class="card wa-card">
+      <div class="wa-head">
+        <h2>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="#1ea463"><path d="M12 2a10 10 0 0 0-8.6 15l-1.4 5 5.1-1.3A10 10 0 1 0 12 2zm0 18a8 8 0 0 1-4.1-1.1l-.3-.2-3 .8.8-2.9-.2-.3A8 8 0 1 1 12 20zm4.4-5.6c-.2-.1-1.4-.7-1.6-.8s-.4-.1-.5.1-.6.8-.8 1-.3.2-.5.1a6.5 6.5 0 0 1-3.2-2.8c-.2-.4.2-.4.6-1.2a.5.5 0 0 0 0-.5l-.8-1.8c-.2-.5-.4-.4-.5-.4h-.5a.9.9 0 0 0-.7.3 2.8 2.8 0 0 0-.9 2.1 4.9 4.9 0 0 0 1 2.6 11 11 0 0 0 4.3 3.8c1.6.7 2.2.7 3 .6a2.5 2.5 0 0 0 1.6-1.1 2 2 0 0 0 .1-1.1c0-.1-.2-.2-.4-.3z"/></svg>
+          WhatsApp reminder
+        </h2>
+        <div class="wa-actions">
+          <button class="btn wa" id="btn-wa-share">Share to WhatsApp</button>
+          <button class="btn" id="btn-wa-copy">Copy</button>
+        </div>
       </div>
-      <button class="btn" id="btn-ics" title="Download a calendar of every renewal">📅 Renewal calendar</button>
-      <button class="btn" id="btn-print" title="Print or save as PDF">🖨️ Print</button>
-    </div>
-  </header>
-
-  <!-- KPIs -->
-  <div class="kpis fade-in" id="kpis"></div>
-
-  <!-- Action banner -->
-  <div id="banner-slot"></div>
-
-  <!-- Charts -->
-  <div class="section fade-in">
-    <div class="section-head"><h2>At a glance</h2><div class="meta">Live snapshot</div></div>
-    <div class="charts">
-      <div class="chart-card"><h3>Expiry timeline</h3><div class="sub">Renewals due each month · next 12 months</div><div class="chart-wrap"><canvas id="c-timeline"></canvas></div></div>
-      <div class="chart-card"><h3>Status mix</h3><div class="sub">All tracked papers</div><div class="chart-wrap"><canvas id="c-status"></canvas></div></div>
-      <div class="chart-card"><h3>Annual spend</h3><div class="sub">By document type</div><div class="chart-wrap"><canvas id="c-spend"></canvas></div></div>
+      <div class="pill-note" style="margin-bottom:10px">Auto-built from today's data. Tap <b>Share</b> → pick the <b>Car papers</b> group → Send.</div>
+      <div class="wa-msg mono" id="wa-msg"></div>
     </div>
   </div>
 
-  <!-- Compliance gaps -->
-  <div class="section fade-in" id="gaps-section">
-    <div class="section-head"><h2>Compliance gaps</h2><div class="meta" id="gaps-meta"></div></div>
+  <!-- Charts -->
+  <div class="section">
+    <div class="section-head"><h2>At a glance</h2><div class="meta">Live snapshot</div></div>
+    <div class="charts">
+      <div class="card chart-card"><h3>Renewal timeline</h3><div class="sub">Papers due each month · next 12 months</div><div class="chart-wrap"><canvas id="c-timeline"></canvas></div></div>
+      <div class="card chart-card"><h3>Status mix</h3><div class="sub">All tracked papers</div><div class="chart-wrap"><canvas id="c-status"></canvas></div></div>
+      <div class="card chart-card"><h3>Annual spend</h3><div class="sub">By document type</div><div class="chart-wrap"><canvas id="c-spend"></canvas></div></div>
+    </div>
+  </div>
+
+  <!-- Missing documents -->
+  <div class="section" id="gaps-section">
+    <div class="section-head"><h2>Missing documents</h2><div class="meta" id="gaps-meta"></div></div>
     <div class="gaps-grid" id="gaps-grid"></div>
   </div>
 
-  <!-- Data review (automated record check) -->
-  <div class="section fade-in" id="review-section">
+  <!-- Data review -->
+  <div class="section" id="review-section">
     <div class="section-head"><h2>Data review</h2><div class="meta" id="review-meta"></div></div>
     <div class="gaps-grid" id="review-grid"></div>
   </div>
@@ -488,18 +483,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <!-- Fleets -->
   <div class="section">
     <div class="section-head"><h2>The fleet</h2><div class="meta" id="fleet-count"></div></div>
-    <div class="fleet-tabs" id="fleet-tabs"></div>
+    <div class="tabs" id="fleet-tabs"></div>
     <div id="fleets"></div>
   </div>
 
   <!-- Everything table -->
   <div class="section">
-    <div class="section-head"><h2>Every paper, sorted</h2><div class="meta">Filter &amp; export</div></div>
+    <div class="section-head"><h2>Every paper</h2><div class="meta">Filter &amp; export</div></div>
     <div class="tabs" id="status-tabs">
       <button class="pill-btn active" data-filter="all">All</button>
       <button class="pill-btn" data-filter="overdue">Overdue</button>
       <button class="pill-btn" data-filter="critical">Urgent</button>
-      <button class="pill-btn" data-filter="warning">Upcoming</button>
+      <button class="pill-btn" data-filter="warning">Due soon</button>
       <button class="pill-btn" data-filter="document">Documents</button>
       <button class="pill-btn" data-filter="service">Services</button>
     </div>
@@ -515,65 +510,66 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   </div>
 
   <footer>
-    <div>Built from your fleet sheet · Deployed via GitHub Pages</div>
-    <div id="generated-at"></div>
+    <div>Built from your fleet sheet · Deployed on Cloudflare Pages</div>
+    <div id="generated-at" class="mono"></div>
   </footer>
 </div>
 
-<!-- hidden file input reused for all uploads -->
 <input type="file" id="file-input" class="hidden" accept="image/*,application/pdf" />
 
 <script>
 const DATA = __DATA__;
-const FLEET_DOTS = { "GJMS School":"#6366f1", "G.B. Automobiles":"#06b6d4", "Family & Personal":"#ec4899" };
+const FLEET_DOTS = { "GJMS School":"#3538cd", "G.B. Automobiles":"#0e7090", "Family & Personal":"#667085" };
 
-// File map: key "vehicleId|DocType" -> {url, name}. Seeded from any sheet links.
 const fileMap = {};
 DATA.all_items.forEach(i => { if (i.file_link) fileMap[i.key] = { url:i.file_link, name:"document" }; });
 
 document.getElementById('today').textContent = DATA.generated_display;
 document.getElementById('generated-at').textContent = 'Generated ' + DATA.generated_at;
 
-/* ---------- KPIs ---------- */
 function formatINR(n){
   n=Number(n)||0;
   if(n>=1e7) return '₹'+(n/1e7).toFixed(2).replace(/\.00$/,'')+' Cr';
   if(n>=1e5) return '₹'+(n/1e5).toFixed(2).replace(/\.00$/,'')+' L';
   return '₹'+n.toLocaleString('en-IN');
 }
+
+/* ---------- KPIs ---------- */
 (function(){
   const s = DATA.stats;
   const cards = [
-    { label:'Vehicles', value:s.vehicles, accent:'#6366f1' },
-    { label:'Papers', value:s.total_items, accent:'#06b6d4' },
-    { label:'Overdue', value:s.overdue, accent:'#e11d48', alert:s.overdue>0 },
-    { label:'Urgent ≤7d', value:s.critical, accent:'#f97316', alert:s.critical>0 },
-    { label:'Upcoming ≤30d', value:s.warning, accent:'#eab308' },
-    { label:'Missing papers', value:s.missing_required, accent:'#db2777', alert:s.missing_required>0, sub:'legally required' },
-    { label:'Annual ₹', value:formatINR(s.annual_spend), accent:'#22c55e', sub:'recurring' },
+    { label:'Vehicles', value:s.vehicles },
+    { label:'Papers tracked', value:s.total_items },
+    { label:'Overdue', value:s.overdue, alert:s.overdue>0 },
+    { label:'Urgent ≤7d', value:s.critical, alert:s.critical>0 },
+    { label:'Missing papers', value:s.missing_required, alert:s.missing_required>0, sub:'legally required' },
+    { label:'Annual cost', value:formatINR(s.annual_spend), sub:'recorded premiums' },
   ];
   document.getElementById('kpis').innerHTML = cards.map(c => `
-    <div class="kpi" style="--accent:${c.accent}">
+    <div class="kpi ${c.alert?'alert':''}">
       <div class="k-label">${c.label}</div>
-      <div class="k-value" style="${c.alert?`color:${c.accent}`:''}">${c.value}</div>
+      <div class="k-value">${c.value}</div>
       ${c.sub?`<div class="k-sub">${c.sub}</div>`:''}
     </div>`).join('');
 })();
 
-/* ---------- Action banner ---------- */
+/* ---------- WhatsApp reminder ---------- */
 (function(){
-  const urgent = DATA.all_items.filter(i => i.urgency==='overdue' || i.urgency==='critical')
-                               .sort((a,b)=>a.days_left-b.days_left);
-  if (!urgent.length) return;
-  const lines = urgent.slice(0,6).map(i =>
-    `<b>${i.vehicle_name}</b> — ${i.type} <span style="opacity:.9">(${i.days_display})</span>`).join(' &nbsp;·&nbsp; ');
-  document.getElementById('banner-slot').innerHTML = `
-    <div class="banner fade-in">
-      <div>
-        <h3>⚠️ ${urgent.length} paper${urgent.length>1?'s':''} need action now</h3>
-        <div class="b-list">${lines}</div>
-      </div>
-    </div>`;
+  const msg = (DATA.whatsapp_message||'').trim();
+  const sec = document.getElementById('wa-section');
+  if(!msg){ sec.querySelector('.wa-msg').textContent='Nothing to report — every paper is valid and nothing is missing. 🎉';
+            document.getElementById('btn-wa-share').classList.add('hidden');
+            document.getElementById('btn-wa-copy').classList.add('hidden'); return; }
+  // Render with light markdown (*bold*) -> <b>
+  const html = msg.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/\*(.+?)\*/g,'<b>$1</b>');
+  document.getElementById('wa-msg').innerHTML = html;
+  document.getElementById('btn-wa-share').addEventListener('click',()=>{
+    window.open('https://wa.me/?text='+encodeURIComponent(msg),'_blank');
+  });
+  document.getElementById('btn-wa-copy').addEventListener('click',async(e)=>{
+    try{ await navigator.clipboard.writeText(msg); e.target.textContent='Copied ✓'; setTimeout(()=>e.target.textContent='Copy',1500); }
+    catch(err){ alert('Copy failed — select the text manually.'); }
+  });
 })();
 
 /* ---------- Charts ---------- */
@@ -583,70 +579,73 @@ function formatINR(n){
     months.push({key:d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'),
       label:d.toLocaleString('en-GB',{month:'short',year:'2-digit'}),count:0}); }
   DATA.timeline.forEach(it=>{ const m=months.find(x=>x.key===it.expiry_date.substring(0,7)); if(m)m.count++; });
+  const gridC='#eef0f3', tickC='#667085', font={family:'Inter',size:10};
   new Chart(document.getElementById('c-timeline'),{type:'bar',
     data:{labels:months.map(m=>m.label),datasets:[{data:months.map(m=>m.count),
-      backgroundColor:months.map(m=>m.count>2?'#ec4899':m.count>0?'#6366f1':'#28315a'),borderRadius:6,borderSkipped:false}]},
+      backgroundColor:'#3538cd',borderRadius:4,borderSkipped:false,maxBarThickness:26}]},
     options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},
       tooltip:{callbacks:{label:c=>c.parsed.y+' renewal(s)'}}},
-      scales:{x:{grid:{display:false},ticks:{color:'#8390bd',font:{family:'JetBrains Mono',size:10}}},
-        y:{beginAtZero:true,ticks:{stepSize:1,color:'#8390bd',font:{family:'JetBrains Mono',size:10}},grid:{color:'rgba(255,255,255,.06)'}}}}});
+      scales:{x:{grid:{display:false},ticks:{color:tickC,font}},
+        y:{beginAtZero:true,ticks:{stepSize:1,color:tickC,font},grid:{color:gridC}}}}});
 
-  const sc=DATA.status_counts; const SC=[['Overdue',sc.overdue,'#e11d48'],['Urgent',sc.critical,'#f97316'],
-    ['Upcoming',sc.warning,'#eab308'],['Scheduled',sc.ok,'#22c55e'],['Later',sc.far,'#64748b']].filter(x=>x[1]>0);
+  const sc=DATA.status_counts; const SC=[['Overdue',sc.overdue,'#d92d20'],['Urgent',sc.critical,'#f79009'],
+    ['Due soon',sc.warning,'#eab308'],['Valid',sc.ok+sc.far,'#12b76a']].filter(x=>x[1]>0);
   new Chart(document.getElementById('c-status'),{type:'doughnut',
-    data:{labels:SC.map(x=>x[0]),datasets:[{data:SC.map(x=>x[1]),backgroundColor:SC.map(x=>x[2]),borderColor:'#161d38',borderWidth:3}]},
-    options:{responsive:true,maintainAspectRatio:false,cutout:'60%',
-      plugins:{legend:{position:'bottom',labels:{color:'#c2c8e6',font:{family:'Inter',size:11},boxWidth:10,padding:10}}}}});
+    data:{labels:SC.map(x=>x[0]),datasets:[{data:SC.map(x=>x[1]),backgroundColor:SC.map(x=>x[2]),borderColor:'#fff',borderWidth:2}]},
+    options:{responsive:true,maintainAspectRatio:false,cutout:'62%',
+      plugins:{legend:{position:'bottom',labels:{color:'#475467',font:{family:'Inter',size:11},boxWidth:9,padding:9,usePointStyle:true}}}}});
 
   const sp=Object.entries(DATA.spend_by_type).sort((a,b)=>b[1]-a[1]);
+  const SHADES=['#3538cd','#5b5ee0','#8284ec','#aab0f4','#0e7090','#3a9ab5'];
   if(!sp.length){ document.getElementById('c-spend').parentElement.innerHTML='<div class="empty">No amounts recorded yet</div>'; }
   else { new Chart(document.getElementById('c-spend'),{type:'doughnut',
     data:{labels:sp.map(e=>e[0]),datasets:[{data:sp.map(e=>e[1]),
-      backgroundColor:sp.map(e=>DATA.doc_colors[e[0]]||'#475569'),borderColor:'#161d38',borderWidth:3}]},
-    options:{responsive:true,maintainAspectRatio:false,cutout:'60%',
-      plugins:{legend:{position:'bottom',labels:{color:'#c2c8e6',font:{family:'Inter',size:11},boxWidth:10,padding:10}},
+      backgroundColor:sp.map((e,i)=>SHADES[i%SHADES.length]),borderColor:'#fff',borderWidth:2}]},
+    options:{responsive:true,maintainAspectRatio:false,cutout:'62%',
+      plugins:{legend:{position:'bottom',labels:{color:'#475467',font:{family:'Inter',size:11},boxWidth:9,padding:9,usePointStyle:true}},
         tooltip:{callbacks:{label:c=>c.label+': ₹'+c.parsed.toLocaleString('en-IN')}}}}}); }
 })();
 
-/* ---------- Compliance gaps ---------- */
+/* ---------- Missing documents ---------- */
 (function(){
   const g=DATA.missing_report;
-  document.getElementById('gaps-meta').textContent = g.length ? g.length+' vehicle(s) with gaps' : 'all clear';
-  if(!g.length){ document.getElementById('gaps-grid').innerHTML='<div class="empty">🎉 Every vehicle has all its legally-required papers on record.</div>'; return; }
+  document.getElementById('gaps-meta').textContent = g.length ? g.length+' vehicle(s) with missing papers' : 'all clear';
+  if(!g.length){ document.getElementById('gaps-grid').innerHTML='<div class="empty">Every vehicle has all its legally-required papers on record.</div>'; return; }
   document.getElementById('gaps-grid').innerHTML = g.map(v=>`
     <div class="gap-card">
       <div class="g-name">${v.vehicle_name}</div>
-      <div class="g-reg">${v.registration_number||'—'} · ${v.owner_group}</div>
+      <div class="g-reg">${v.registration_number||'—'} · ${v.owner_group}${v.has_any?'':' · <b style="color:var(--red)">no documents at all</b>'}</div>
       <div class="missing-row">
         <span class="missing-label">Missing</span>
-        ${v.missing.map(m=>`<span class="status-pill" style="background:${DATA.doc_colors[m]||'#db2777'}">${m}</span>`).join('')}
+        ${v.missing.map(m=>`<span class="miss-pill">${m}</span>`).join('')}
       </div>
     </div>`).join('');
 })();
 
-/* ---------- Data review section ---------- */
+/* ---------- Data review ---------- */
 (function(){
   const r=DATA.review_report||[];
-  const meta=document.getElementById('review-meta');
-  meta.textContent = r.length ? (DATA.issues_total+' issue(s) across '+r.length+' vehicle(s)') : 'no issues found';
-  if(!r.length){ document.getElementById('review-grid').innerHTML='<div class="empty">✅ No data-quality issues detected in the records.</div>'; return; }
-  document.getElementById('review-grid').innerHTML = r.map(v=>`
-    <div class="gap-card issue-card">
+  document.getElementById('review-meta').textContent = r.length ? (DATA.issues_total+' issue(s) across '+r.length+' vehicle(s)') : 'no issues found';
+  if(!r.length){ document.getElementById('review-grid').innerHTML='<div class="empty">No data-quality issues detected in the records.</div>'; return; }
+  document.getElementById('review-grid').innerHTML = r.map(v=>{
+    const worst = v.issues.some(i=>i.level==='error') ? '' : 'warn-card';
+    return `
+    <div class="gap-card ${worst}">
       <div class="g-name">${v.vehicle_name}</div>
       <div class="g-reg">${v.registration_number||'—'} · ${v.owner_group}</div>
       ${v.issues.map(it=>`<div class="issue-line"><span class="issue-dot lvl-${it.level}"></span><span>${it.text}</span></div>`).join('')}
-    </div>`).join('');
+    </div>`;}).join('');
 })();
 
 /* ---------- File button ---------- */
 function fileBtnHtml(it){
   const f = fileMap[it.key];
-  if (f) return `<a class="file-btn has-file" href="${f.url}" target="_blank" rel="noopener" title="Download / view">⬇ File</a>`;
-  if (!DATA.doc_api_url) return `<span class="file-btn disabled" title="Document storage not connected yet">⬆ Upload</span>`;
-  return `<button class="file-btn" data-up="${it.key}" data-vid="${it.vehicle_id}" data-dtype="${it.type}" title="Upload a scan">⬆ Upload</button>`;
+  if (f) return `<a class="file-btn has-file" href="${f.url}" target="_blank" rel="noopener" title="Download / view">View file</a>`;
+  if (!DATA.doc_api_url) return `<span class="file-btn disabled" title="Document storage not connected yet">Upload</span>`;
+  return `<button class="file-btn" data-up="${it.key}" data-vid="${it.vehicle_id}" data-dtype="${it.type}" title="Upload a scan">Upload</button>`;
 }
 
-/* ---------- Fleets (grouped vehicle cards) ---------- */
+/* ---------- Fleets ---------- */
 let fleetFilter = 'all';
 function renderFleets(){
   const q = (document.getElementById('search').value||'').toLowerCase().trim();
@@ -662,47 +661,47 @@ function renderFleets(){
     if (!vs.length) return;
     shown += vs.length;
     const cards = vs.map(v=>{
-      const ringC = v.compliance_pct>=100?'#22c55e':v.compliance_pct>=50?'#eab308':'#e11d48';
+      const ringC = v.compliance_pct>=100?'#12b76a':v.compliance_pct>=50?'#eab308':'#d92d20';
       const docs = v.items.map(it=>`
         <li class="doc-item">
           <div class="doc-left">
-            <span class="doc-type"><span class="swatch" style="background:${it.type_color}"></span>${it.type}${it.provider?` <span style="color:var(--ink-muted);font-weight:400;font-size:12px">· ${it.provider}</span>`:''}</span>
+            <span class="doc-type">${it.type}${it.provider?` <span class="prov">· ${it.provider}</span>`:''}</span>
             <span class="doc-exp">${it.expiry_display} · ${it.days_display}${it.amount?` · ₹${Number(it.amount).toLocaleString('en-IN')}`:''}</span>
           </div>
           <div class="doc-right">
-            <span class="status-pill" style="background:${it.urgency_color}">${it.urgency_label}</span>
+            <span class="status-pill" style="color:${it.u_fg};background:${it.u_bg};border-color:${it.u_bd}">${it.urgency_label}</span>
             ${fileBtnHtml(it)}
           </div>
         </li>`).join('');
       const missing = v.missing.length ? `
         <div class="missing-row"><span class="missing-label">Missing</span>
-          ${v.missing.map(m=>`<span class="status-pill" style="background:${DATA.doc_colors[m]||'#db2777'}">${m}</span>`).join('')}
+          ${v.missing.map(m=>`<span class="miss-pill">${m}</span>`).join('')}
         </div>` : '';
       const issues = (v.issues&&v.issues.length) ? `
         <div class="issue-badges">
           ${v.issues.map(it=>`<span class="issue-badge"><span class="issue-dot lvl-${it.level}"></span>${it.text}</span>`).join('')}
         </div>` : '';
       return `
-        <div class="vehicle-card fade-in">
+        <div class="vehicle-card">
           <div class="vehicle-head">
             <div style="min-width:0">
               <div class="vehicle-name">${v.name}</div>
               <div class="vehicle-reg">${v.registration_number||'—'}</div>
             </div>
-            <div style="display:flex;flex-direction:column;align-items:center;gap:8px">
-              <div class="ring" style="--pct:${v.compliance_pct};--ring-c:${ringC}"><span>${v.compliance_pct}%</span></div>
+            <div style="display:flex;flex-direction:column;align-items:center;gap:7px">
+              <div class="ring" style="--pct:${v.compliance_pct};--ring-c:${ringC}" title="${v.compliance_pct}% of required papers on record"><span style="color:${ringC}">${v.compliance_pct}%</span></div>
               <span class="vehicle-type-chip">${v.type}</span>
             </div>
           </div>
           ${missing}
           ${issues}
-          <ul class="doc-list">${docs || '<li class="doc-item" style="color:var(--ink-muted)">No papers on record yet.</li>'}</ul>
+          <ul class="doc-list">${docs || '<li class="doc-item" style="color:var(--muted)">No papers on record yet.</li>'}</ul>
           ${v.notes?`<div class="veh-note">📝 ${v.notes}</div>`:''}
         </div>`;
     }).join('');
     host.insertAdjacentHTML('beforeend', `
       <div class="fleet-group">
-        <h3 class="fleet-title"><span class="dot" style="background:${FLEET_DOTS[g]||'#6366f1'}"></span>${g} <span style="color:var(--ink-muted);font-weight:400">· ${vs.length}</span></h3>
+        <h3 class="fleet-title"><span class="dot" style="background:${FLEET_DOTS[g]||'#667085'}"></span>${g} <span class="n">· ${vs.length}</span></h3>
         <div class="vehicles-grid">${cards}</div>
       </div>`);
   });
@@ -737,12 +736,12 @@ function renderTable(){
   tb.innerHTML=rows.map(i=>`
     <tr>
       <td class="td-veh">${i.vehicle_name}</td>
-      <td><span class="doc-type"><span class="swatch" style="background:${i.type_color}"></span>${i.type}</span></td>
-      <td class="td-mono">${grp[i.vehicle_id]||''}</td>
-      <td class="td-mono">${i.expiry_display}</td>
-      <td class="td-mono">${i.days_display}</td>
-      <td class="td-mono">${i.amount?'₹'+Number(i.amount).toLocaleString('en-IN'):'—'}</td>
-      <td><span class="status-pill" style="background:${i.urgency_color}">${i.urgency_label}</span></td>
+      <td><span class="doc-pill">${i.type}</span></td>
+      <td class="td-mut">${grp[i.vehicle_id]||''}</td>
+      <td class="td-mut">${i.expiry_display}</td>
+      <td class="td-mut">${i.days_display}</td>
+      <td class="td-mut">${i.amount?'₹'+Number(i.amount).toLocaleString('en-IN'):'—'}</td>
+      <td><span class="status-pill" style="color:${i.u_fg};background:${i.u_bg};border-color:${i.u_bd}">${i.urgency_label}</span></td>
       <td>${fileBtnHtml(i)}</td>
     </tr>`).join('');
 }
@@ -751,10 +750,9 @@ document.querySelectorAll('#status-tabs .pill-btn').forEach(b=>b.addEventListene
   b.classList.add('active'); statusFilter=b.dataset.filter; renderTable();
 }));
 
-/* ---------- Search ---------- */
 document.getElementById('search').addEventListener('input',()=>{ renderFleets(); renderTable(); });
 
-/* ---------- Upload (Apps Script) ---------- */
+/* ---------- Upload ---------- */
 let pendingUpload=null;
 const fileInput=document.getElementById('file-input');
 document.addEventListener('click',e=>{
@@ -773,31 +771,30 @@ fileInput.addEventListener('change',async()=>{
       body:JSON.stringify({action:'upload',token:DATA.doc_api_token,vehicle_id:vid,doc_type:dtype,filename:file.name,mimeType:file.type,dataBase64})});
     const j=await resp.json();
     if(j.ok){ fileMap[key]={url:j.url,name:j.name||file.name}; renderFleets(); renderTable(); }
-    else { alert('Upload failed: '+(j.error||'unknown error')); btn.classList.remove('uploading'); btn.textContent='⬆ Upload'; }
-  }catch(err){ alert('Upload error: '+err.message); btn.classList.remove('uploading'); btn.textContent='⬆ Upload'; }
+    else { alert('Upload failed: '+(j.error||'unknown error')); btn.classList.remove('uploading'); btn.textContent='Upload'; }
+  }catch(err){ alert('Upload error: '+err.message); btn.classList.remove('uploading'); btn.textContent='Upload'; }
   pendingUpload=null;
 });
 
-/* ---------- Load existing files from the API ---------- */
 async function loadFiles(){
   if(!DATA.doc_api_url) return;
   try{
     const r=await fetch(DATA.doc_api_url+(DATA.doc_api_url.includes('?')?'&':'?')+'action=files');
     const j=await r.json();
     if(j&&j.files){ Object.assign(fileMap,j.files); renderFleets(); renderTable(); }
-  }catch(e){ /* non-fatal: dashboard still works without the file overlay */ }
+  }catch(e){ /* non-fatal */ }
 }
 
 /* ---------- Renewal calendar (.ics) ---------- */
 document.getElementById('btn-ics').addEventListener('click',()=>{
   const pad=n=>String(n).padStart(2,'0');
   const fmt=d=>d.getFullYear()+pad(d.getMonth()+1)+pad(d.getDate());
-  const lines=['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//The Garage//Fleet Papers//EN','CALSCALE:GREGORIAN'];
+  const lines=['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//Fleet Register//EN','CALSCALE:GREGORIAN'];
   DATA.all_items.forEach(i=>{
     const d=new Date(i.expiry_date+'T00:00:00');
     const dt=fmt(d); const end=fmt(new Date(d.getTime()+86400000));
     lines.push('BEGIN:VEVENT',
-      'UID:'+i.key.replace(/[^a-z0-9]/gi,'')+'@garage',
+      'UID:'+i.key.replace(/[^a-z0-9]/gi,'')+'@fleet',
       'DTSTART;VALUE=DATE:'+dt,'DTEND;VALUE=DATE:'+end,
       'SUMMARY:'+(i.type+' — '+i.vehicle_name+(i.days_left<0?' (OVERDUE)':'')),
       'DESCRIPTION:'+(i.provider?('Provider '+i.provider+'. '):'')+'Expires '+i.expiry_display,

@@ -10,10 +10,12 @@ from datetime import date, timedelta
 from core import (
     build_items,
     classify_urgency,
+    compose_whatsapp_reminder,
     items_needing_email,
     missing_required,
     owner_group,
     required_docs_for,
+    vehicle_missing_map,
 )
 
 REMINDER_DAYS = [14, 7, 3, 1, 0]
@@ -108,6 +110,57 @@ def run() -> int:
           owner_group("M/S G.B. Automobiles") == "G.B. Automobiles")
     check("unknown owner -> Family & Personal",
           owner_group("Ashok Kumar") == "Family & Personal")
+
+    # --- WhatsApp reminder composition --- #
+    # A car overdue on insurance + a commercial vehicle missing required papers.
+    cfg = {
+        "settings": {},
+        "vehicles": [
+            {"id": "c1", "name": "Test Car", "registration_number": "UP60 AA 1111",
+             "type": "Car", "owner": "Ashok Kumar",
+             "documents": [{"type": "Insurance",
+                            "expiry_date": (date.today() - timedelta(days=5)).isoformat()}],
+             "services": []},
+            {"id": "b1", "name": "Test Bus", "registration_number": "UP60 T 2222",
+             "type": "Commercial Vehicle", "owner": "Gopal Ji School",
+             "documents": [{"type": "Insurance",
+                            "expiry_date": (date.today() + timedelta(days=200)).isoformat()}],
+             "services": []},
+        ],
+        "personal": [],
+    }
+    items = build_items(cfg)
+    mm = vehicle_missing_map(cfg, items)
+    check("missing-map flags the car (no PUC/RC)", any(m["name"] == "Test Car" for m in mm))
+    check("missing-map flags the bus (no PUC/Fitness/Permit/RoadTax/RC)",
+          any(m["name"] == "Test Bus" and "Permit" in m["missing"] for m in mm))
+    check("car with only-lapsed-insurance is marked has_any=True",
+          any(m["name"] == "Test Car" and m["has_any"] for m in mm))
+
+    msg = compose_whatsapp_reminder(cfg, items)
+    check("WhatsApp message is non-empty when there is something to report", bool(msg))
+    check("WhatsApp message lists the overdue insurance", "OVERDUE" in msg and "Test Car" in msg)
+    check("WhatsApp message flags an uninsured vehicle", "bina beema" in msg)
+    check("WhatsApp message has a missing-papers section", "record me nahi" in msg)
+    check("WhatsApp message includes the dashboard link", "garage-fleet.pages.dev" in msg)
+
+    # Fully-compliant, all-valid fleet -> empty message (so the daily job stays silent).
+    clean_cfg = {
+        "settings": {},
+        "vehicles": [{
+            "id": "ok1", "name": "Clean Car", "registration_number": "UP60 ZZ 9999",
+            "type": "Car", "owner": "Ashok Kumar",
+            "documents": [
+                {"type": "Insurance", "expiry_date": (date.today() + timedelta(days=300)).isoformat()},
+                {"type": "PUC", "expiry_date": (date.today() + timedelta(days=200)).isoformat()},
+                {"type": "Registration (RC)", "expiry_date": (date.today() + timedelta(days=900)).isoformat()},
+            ],
+            "services": [],
+        }],
+        "personal": [],
+    }
+    check("WhatsApp message is empty when nothing needs action",
+          compose_whatsapp_reminder(clean_cfg, build_items(clean_cfg)) == "")
 
     if failures:
         print(f"FAIL: {len(failures)} test(s) failed:")

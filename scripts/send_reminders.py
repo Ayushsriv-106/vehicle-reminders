@@ -1,145 +1,84 @@
-"""Daily reminder script — sends one email summarising everything due soon.
+"""Daily hands-free WhatsApp reminder.
 
-Triggered by GitHub Actions cron. Reads SMTP creds from environment variables:
-  SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, EMAIL_TO, EMAIL_FROM
+Builds the exact message that should go to the "Car papers" WhatsApp group and
+emails it to YOU, ready to post: a clean email with the message + a one-tap
+"Share to WhatsApp" button (WhatsApp can't auto-post into a group, so the only
+manual step is the single Send tap). Runs from GitHub Actions on the daily cron.
+
+Quiet by design — it does NOT email every day:
+  * It fires when a paper crosses a reminder threshold today (the quiet ramp in
+    items_needing_email), OR
+  * once a week (Monday) if any vehicle is still missing legally-required papers,
+    so chronic gaps aren't forgotten without becoming daily spam.
+The full live picture always lives on the dashboard.
+
+SMTP creds + recipient come from environment variables:
+  SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, EMAIL_FROM
+  WA_REMINDER_TO  (who gets the ready-to-post email; defaults to the owner)
 """
 from __future__ import annotations
 
 import os
 import smtplib
 import sys
+import urllib.parse
 from datetime import date
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-from core import Item, build_items, items_needing_email, load_config
+from core import (
+    build_items,
+    compose_whatsapp_reminder,
+    items_needing_email,
+    load_config,
+    vehicle_missing_map,
+)
 
-
-URGENCY_META = {
-    "overdue":  {"emoji": "🚨", "label": "OVERDUE",  "color": "#c1121f"},
-    "critical": {"emoji": "🔴", "label": "URGENT",   "color": "#e85d04"},
-    "warning":  {"emoji": "🟡", "label": "Upcoming", "color": "#d4a017"},
-}
-
-# Live dashboard — used when the DASHBOARD_URL env/var isn't set, so the email
-# always has a working "Open full dashboard" button. Points at the gated
-# Cloudflare site (set DASHBOARD_URL to override, e.g. a custom domain).
 DEFAULT_DASHBOARD_URL = "https://garage-fleet.pages.dev/"
+# Send the ready-to-post email here. Single recipient on purpose — the old
+# multi-recipient list bounced (a full inbox), which is why email was paused.
+DEFAULT_REMINDER_TO = "ayushsrivastava9997@gmail.com"
+WEEKLY_NUDGE_WEEKDAY = 0  # Monday — weekly heartbeat for chronic missing papers
 
 
-def _fmt_days(days: int) -> str:
-    if days < 0:
-        return f"{abs(days)} day{'s' if abs(days) != 1 else ''} overdue"
-    if days == 0:
-        return "expires TODAY"
-    return f"in {days} day{'s' if days != 1 else ''}"
-
-
-def render_email_html(items: list[Item]) -> str:
-    today = date.today().strftime("%A, %d %B %Y")
-
-    # Group by urgency
-    groups: dict[str, list[Item]] = {"overdue": [], "critical": [], "warning": []}
-    for i in items:
-        if i.urgency in groups:
-            groups[i.urgency].append(i)
-
-    sections_html = []
-    for key in ("overdue", "critical", "warning"):
-        group_items = groups[key]
-        if not group_items:
-            continue
-        meta = URGENCY_META[key]
-        rows = []
-        for i in group_items:
-            amount = f"₹{i.amount:,.0f}" if i.amount else "—"
-            link = (
-                f'<a href="{i.file_link}" style="color:#0066cc;text-decoration:none;">📄 View</a>'
-                if i.file_link else "—"
-            )
-            rows.append(f"""
-              <tr style="border-bottom:1px solid #eee;">
-                <td style="padding:10px 8px;font-weight:600;">{i.vehicle_name}</td>
-                <td style="padding:10px 8px;">{i.type}</td>
-                <td style="padding:10px 8px;color:{meta['color']};font-weight:600;">
-                  {i.expiry_date.strftime('%d %b %Y')}<br>
-                  <span style="font-size:12px;font-weight:400;">{_fmt_days(i.days_left)}</span>
-                </td>
-                <td style="padding:10px 8px;">{amount}</td>
-                <td style="padding:10px 8px;">{link}</td>
-              </tr>
-            """)
-        sections_html.append(f"""
-          <h2 style="color:{meta['color']};margin:24px 0 8px;font-size:18px;">
-            {meta['emoji']} {meta['label']} ({len(group_items)})
-          </h2>
-          <table style="width:100%;border-collapse:collapse;font-size:14px;">
-            <thead>
-              <tr style="background:#f7f7f7;text-align:left;">
-                <th style="padding:10px 8px;">Vehicle</th>
-                <th style="padding:10px 8px;">Document</th>
-                <th style="padding:10px 8px;">Expires</th>
-                <th style="padding:10px 8px;">Amount</th>
-                <th style="padding:10px 8px;">File</th>
-              </tr>
-            </thead>
-            <tbody>{''.join(rows)}</tbody>
-          </table>
-        """)
-
-    dashboard_url = os.environ.get("DASHBOARD_URL", "").strip() or DEFAULT_DASHBOARD_URL
-    dashboard_link = (
-        f'<p style="margin-top:24px;"><a href="{dashboard_url}" '
-        f'style="background:#111;color:#fff;padding:10px 18px;border-radius:6px;'
-        f'text-decoration:none;display:inline-block;">Open full dashboard →</a></p>'
-    )
-
+def render_email_html(message: str, wa_url: str, dashboard_url: str) -> str:
+    safe = (message.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
     return f"""<!DOCTYPE html>
-<html><body style="font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;max-width:720px;margin:0 auto;padding:24px;color:#1a1a1a;">
-  <h1 style="font-size:22px;margin:0 0 4px;">Vehicle Reminders</h1>
-  <p style="color:#666;margin:0 0 16px;font-size:14px;">{today}</p>
-  <p style="font-size:15px;">You have <b>{len(items)}</b> item(s) that need attention.</p>
-  {''.join(sections_html)}
-  {dashboard_link}
-  <hr style="margin:32px 0;border:none;border-top:1px solid #eee;">
-  <p style="color:#999;font-size:12px;">You only get this mail in the two weeks around an expiry — the dashboard always has the full picture. Update details in your fleet sheet.</p>
+<html><body style="margin:0;background:#f4f5f7;font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;color:#101828;">
+  <div style="max-width:560px;margin:0 auto;padding:24px;">
+    <h1 style="font-size:19px;margin:0 0 4px;">Fleet papers — ready to post</h1>
+    <p style="color:#667085;margin:0 0 18px;font-size:13px;">{date.today().strftime('%A, %d %B %Y')} · tap the button, pick the <b>Car papers</b> group, Send.</p>
+
+    <a href="{wa_url}" style="display:inline-block;background:#1ea463;color:#fff;padding:12px 22px;border-radius:9px;text-decoration:none;font-weight:600;font-size:15px;">Share to WhatsApp →</a>
+
+    <p style="color:#667085;font-size:12px;margin:14px 0 6px;">Message preview (already prepared):</p>
+    <pre style="background:#fff;border:1px solid #e4e7ec;border-radius:9px;padding:14px 16px;font-size:13px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,'SF Mono',Menlo,monospace;color:#344054;">{safe}</pre>
+
+    <p style="margin-top:18px;"><a href="{dashboard_url}" style="color:#3538cd;font-size:13px;">Open the full dashboard →</a></p>
+    <hr style="margin:26px 0;border:none;border-top:1px solid #e4e7ec;">
+    <p style="color:#98a2b3;font-size:11px;">You only get this when something needs action (a renewal due, a lapse, or a weekly missing-papers nudge). Everything is always live on the dashboard.</p>
+  </div>
 </body></html>"""
 
 
-def render_email_text(items: list[Item]) -> str:
-    today = date.today().strftime("%A, %d %B %Y")
-    lines = [f"Vehicle Reminders — {today}", "=" * 50, ""]
-    for i in items:
-        meta = URGENCY_META.get(i.urgency, {"emoji": "•", "label": ""})
-        lines.append(f"{meta['emoji']} [{meta['label']}] {i.vehicle_name} — {i.type}")
-        lines.append(f"   Expires: {i.expiry_date} ({_fmt_days(i.days_left)})")
-        if i.amount:
-            lines.append(f"   Amount: ₹{i.amount:,.0f}")
-        if i.file_link:
-            lines.append(f"   File: {i.file_link}")
-        lines.append("")
-    return "\n".join(lines)
-
-
-def send_email(subject: str, html_body: str, text_body: str) -> None:
+def send_email(subject: str, html_body: str, text_body: str, to_addr: str) -> None:
     host = os.environ["SMTP_HOST"]
     port = int(os.environ.get("SMTP_PORT", "587"))
     user = os.environ["SMTP_USER"]
     password = os.environ["SMTP_PASSWORD"]
     email_from = os.environ.get("EMAIL_FROM", user)
-    email_to = os.environ["EMAIL_TO"]
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = email_from
-    msg["To"] = email_to
-    msg.attach(MIMEText(text_body, "plain"))
-    msg.attach(MIMEText(html_body, "html"))
+    msg["To"] = to_addr
+    msg.attach(MIMEText(text_body, "plain", "utf-8"))
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
 
     with smtplib.SMTP(host, port) as server:
         server.starttls()
         server.login(user, password)
-        server.sendmail(email_from, [a.strip() for a in email_to.split(",")], msg.as_string())
+        server.sendmail(email_from, [to_addr], msg.as_string())
 
 
 def main() -> int:
@@ -150,31 +89,47 @@ def main() -> int:
     monthly_after_days = settings.get("overdue_monthly_after_days", 30)
 
     items = build_items(config)
-    due = items_needing_email(items, reminder_days, overdue_reminder_days, monthly_after_days)
 
-    if not due:
-        print("✅ Nothing to remind about today. Skipping email.")
+    # Time-sensitive nudges hitting a threshold today.
+    due = items_needing_email(items, reminder_days, overdue_reminder_days, monthly_after_days)
+    # Weekly heartbeat for chronic missing papers (Mondays only).
+    missing = vehicle_missing_map(config, items)
+    weekly_nudge = (date.today().weekday() == WEEKLY_NUDGE_WEEKDAY) and bool(missing)
+
+    if not due and not weekly_nudge:
+        print("Nothing to nudge about today. Staying quiet.")
         return 0
 
-    counts = {k: sum(1 for i in due if i.urgency == k) for k in ("overdue", "critical", "warning")}
+    dashboard_url = os.environ.get("DASHBOARD_URL", "").strip() or DEFAULT_DASHBOARD_URL
+    message = compose_whatsapp_reminder(config, items, dashboard_url=dashboard_url)
+    if not message:
+        print("Nothing to report. Staying quiet.")
+        return 0
+
+    wa_url = "https://wa.me/?text=" + urllib.parse.quote(message)
+
+    counts = {
+        "overdue": sum(1 for i in items if i.days_left < 0),
+        "soon": sum(1 for i in items if 0 <= i.days_left <= 30),
+    }
     parts = []
     if counts["overdue"]:
         parts.append(f"{counts['overdue']} overdue")
-    if counts["critical"]:
-        parts.append(f"{counts['critical']} urgent")
-    if counts["warning"]:
-        parts.append(f"{counts['warning']} upcoming")
-    subject = "🚗 Vehicle reminder: " + ", ".join(parts)
+    if counts["soon"]:
+        parts.append(f"{counts['soon']} due soon")
+    if missing:
+        parts.append(f"{len(missing)} missing papers")
+    subject = "🚗 Car papers reminder — " + (", ".join(parts) if parts else "review") + " (tap to post)"
 
-    html_body = render_email_html(due)
-    text_body = render_email_text(due)
+    to_addr = os.environ.get("WA_REMINDER_TO", "").strip() or DEFAULT_REMINDER_TO
+    html_body = render_email_html(message, wa_url, dashboard_url)
 
     try:
-        send_email(subject, html_body, text_body)
-        print(f"✅ Email sent with {len(due)} items.")
+        send_email(subject, html_body, message, to_addr)
+        print(f"Sent ready-to-post WhatsApp reminder to {to_addr}.")
         return 0
     except Exception as e:
-        print(f"❌ Failed to send email: {e}", file=sys.stderr)
+        print(f"Failed to send reminder email: {e}", file=sys.stderr)
         return 1
 
 

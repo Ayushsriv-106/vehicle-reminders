@@ -211,6 +211,110 @@ def build_items(config: dict, today: date | None = None) -> list[Item]:
     return items
 
 
+def vehicle_missing_map(config: dict, items: list[Item]) -> list[dict]:
+    """Per-vehicle list of legally-required documents that are missing, plus the
+    worst urgency present. Shared by the dashboard and the WhatsApp reminder so
+    'missing papers' is computed exactly once."""
+    out: list[dict] = []
+    for v in config.get("vehicles", []):
+        v_items = [i for i in items if i.vehicle_id == v["id"]]
+        present = {i.type for i in v_items if i.category == "document"}
+        missing = missing_required(present, v.get("type", ""))
+        if missing:
+            out.append({
+                "name": v["name"],
+                "reg": v.get("registration_number", ""),
+                "group": owner_group(v.get("owner", "")),
+                "missing": missing,
+                "has_any": bool(present),
+            })
+    return out
+
+
+def compose_whatsapp_reminder(
+    config: dict,
+    items: list[Item],
+    today: date | None = None,
+    dashboard_url: str = "https://garage-fleet.pages.dev/",
+    max_missing_lines: int = 8,
+) -> str:
+    """Build the ready-to-post Hindi/Hinglish message for the 'Car papers'
+    WhatsApp group. Auto-derives overdue papers, papers expiring within 30 days,
+    and vehicles missing legally-required documents. Returns '' if there is
+    genuinely nothing to act on (so the daily automation can stay silent)."""
+    today = today or date.today()
+
+    overdue = sorted(
+        [i for i in items if i.days_left < 0],
+        key=lambda i: i.days_left,
+    )
+    expiring = sorted(
+        [i for i in items if 0 <= i.days_left <= 30],
+        key=lambda i: i.days_left,
+    )
+    missing = vehicle_missing_map(config, items)
+
+    if not (overdue or expiring or missing):
+        return ""
+
+    def _reg(i: Item) -> str:
+        for v in config.get("vehicles", []):
+            if v["id"] == i.vehicle_id:
+                return v.get("registration_number", "")
+        return ""
+
+    def _days_hi(i: Item) -> str:
+        if i.days_left < 0:
+            return f"{abs(i.days_left)} din se overdue"
+        if i.days_left == 0:
+            return "aaj expire"
+        if i.days_left == 1:
+            return "kal expire"
+        return f"{i.days_left} din me"
+
+    L: list[str] = []
+    L.append(f"\U0001f697 *Gaadi Kaagaz Reminder* — {today.strftime('%d %b %Y')}")
+    L.append("")
+
+    if overdue:
+        L.append(f"\U0001f534 *OVERDUE — turant dekhein ({len(overdue)})*")
+        for i in overdue:
+            reg = _reg(i)
+            tail = ""
+            # Uninsured commercial vehicle is a real liability — call it out.
+            if i.type == "Insurance" and i.category == "document":
+                tail = "  ⚠️ bina beema chal rahi hai"
+            L.append(f"• {i.vehicle_name}{f' ({reg})' if reg else ''} — {i.type}, {_days_hi(i)}{tail}")
+        L.append("")
+
+    if expiring:
+        L.append(f"\U0001f7e0 *Jald expire ho rahe ({len(expiring)})*")
+        for i in expiring:
+            reg = _reg(i)
+            L.append(f"• {i.vehicle_name}{f' ({reg})' if reg else ''} — {i.type}, {_days_hi(i)}")
+        L.append("")
+
+    if missing:
+        total_missing = sum(len(m["missing"]) for m in missing)
+        L.append(f"\U0001f4c4 *Kaagaz record me nahi hain ({total_missing} paper, {len(missing)} gaadi)*")
+        # Most urgent first: vehicles with NO documents, then those missing Insurance.
+        def _rank(m: dict) -> tuple:
+            return (0 if not m["has_any"] else 1,
+                    0 if "Insurance" in m["missing"] else 1)
+        for m in sorted(missing, key=_rank)[:max_missing_lines]:
+            reg = f" ({m['reg']})" if m["reg"] else ""
+            what = "koi document nahi" if not m["has_any"] else ", ".join(m["missing"])
+            L.append(f"• {m['name']}{reg} — {what}")
+        extra = len(missing) - max_missing_lines
+        if extra > 0:
+            L.append(f"• …aur {extra} gaadi (poori list portal par)")
+        L.append("")
+
+    L.append(f"\U0001f517 Poora portal: {dashboard_url}")
+    L.append("(Jis gaadi ke aap responsible hain, uske kaagaz upload kar dein.)")
+    return "\n".join(L)
+
+
 MONTHLY_PERIOD_DAYS = 30
 
 

@@ -71,6 +71,24 @@ jobs:
           # Deploy static assets + Functions; KV binding (DOCS) comes from wrangler.toml.
           $WR pages deploy docs --project-name=garage-fleet --branch=main --commit-dirty=true
 
-      # Reminder emails are intentionally OFF — the team uses the live dashboard
-      # (garage-fleet.pages.dev). To re-enable, restore a step that runs
-      # scripts/send_reminders.py with the SMTP_* / EMAIL_* secrets.
+      # Hands-free WhatsApp reminder: emails YOU the ready-to-post "Car papers"
+      # group message with a one-tap "Share to WhatsApp" button. Quiet by design
+      # (only on reminder-threshold days + a weekly Monday missing-papers nudge).
+      # Skipped cleanly if SMTP isn't configured, so the deploy still stays green.
+      - name: Send WhatsApp-ready reminder
+        if: ${{ always() }}
+        env:
+          SHEET_CSV_URL: ${{ secrets.SHEET_CSV_URL }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          WA_REMINDER_TO: ${{ secrets.WA_REMINDER_TO }}
+          DASHBOARD_URL: ${{ vars.DASHBOARD_URL }}
+        run: |
+          if [ -z "$SMTP_HOST" ]; then
+            echo "SMTP not configured — skipping reminder (dashboard still deployed)."
+            exit 0
+          fi
+          python scripts/send_reminders.py
