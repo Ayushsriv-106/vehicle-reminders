@@ -372,19 +372,17 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .missing-label { font-size:11px; color:var(--red); font-weight:700; text-transform:uppercase; letter-spacing:.03em; }
   .missing-hint { font-size:10.5px; color:var(--muted); width:100%; margin-top:2px; }
   .miss-pill { font-size:11px; font-weight:600; padding:3px 9px; border-radius:6px; background:#fff; color:var(--red); border:1px solid var(--red-bd); display:inline-flex; align-items:center; gap:4px; }
-  /* Blinking red = "missing, please upload". Click to upload its scan. */
-  .miss-pill.need { cursor:pointer; }
+  /* Blinking red = "missing, please upload". Click to upload its scan.
+     Solid red + opacity pulse (compositor-only, cheap even with many on screen). */
+  .miss-pill.need { cursor:pointer; background:#d92d20; color:#fff; border-color:#d92d20; }
   button.miss-pill.need { font-family:inherit; }
-  .miss-pill.need:not(.uploading) { animation: blinkRed 1.15s ease-in-out infinite; }
-  .miss-pill.need:hover { background:var(--red); color:#fff; border-color:var(--red); animation:none; }
+  .miss-pill.need:not(.uploading) { animation: blinkRed 1.2s ease-in-out infinite; }
+  .miss-pill.need:hover { animation:none; opacity:1; background:#b42318; border-color:#b42318; }
   .miss-pill.done { background:var(--grn-bg); color:var(--grn); border-color:var(--grn-bd); cursor:default; animation:none; text-decoration:none; }
-  .miss-pill.uploading { opacity:.7; pointer-events:none; }
-  @keyframes blinkRed {
-    0%,100% { background:#fff; color:var(--red); border-color:var(--red-bd); box-shadow:0 0 0 0 rgba(217,45,32,0); }
-    50%     { background:#d92d20; color:#fff; border-color:#d92d20; box-shadow:0 0 0 3px rgba(217,45,32,.22); }
-  }
+  .miss-pill.uploading { opacity:.7; pointer-events:none; animation:none; }
+  @keyframes blinkRed { 0%,100% { opacity:1; } 50% { opacity:.4; } }
   @media (prefers-reduced-motion: reduce) {
-    .miss-pill.need:not(.uploading) { animation:none; background:#fff5f4; border-color:var(--red); color:var(--red); }
+    .miss-pill.need:not(.uploading) { animation:none; opacity:1; }
   }
   .issue-badges { margin-top:9px; display:flex; flex-wrap:wrap; gap:6px; }
   .issue-badge { font-size:10.5px; padding:3px 8px; border-radius:6px; border:1px solid var(--line); color:var(--ink-2); background:var(--surface-2); display:inline-flex; gap:5px; align-items:center; }
@@ -400,8 +398,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .file-btn { border:1px solid var(--line-strong); background:var(--surface); color:var(--ink-2); border-radius:7px; padding:4px 9px; font-size:11px; font-weight:600; cursor:pointer; display:inline-flex; align-items:center; gap:5px; white-space:nowrap; transition:all .12s; }
   .file-btn:hover { border-color:var(--accent); color:var(--accent); }
   .file-btn.has-file { border-color:var(--grn-bd); color:var(--grn); background:var(--grn-bg); }
+  .file-btn.has-file:hover { border-color:var(--grn); color:var(--grn); }
+  .file-btn.dl { color:var(--ink-2); background:var(--surface); border-color:var(--line-strong); }
+  .file-btn.dl:hover { border-color:var(--accent); color:var(--accent); }
   .file-btn.uploading { opacity:.6; pointer-events:none; }
   .file-btn.disabled { opacity:.5; cursor:not-allowed; }
+  .file-acts { display:inline-flex; gap:6px; }
+  .miss-dl { font-size:11px; font-weight:700; color:var(--grn); background:var(--grn-bg); border:1px solid var(--grn-bd); border-radius:6px; padding:3px 7px; text-decoration:none; line-height:1; }
+  .miss-dl:hover { background:var(--grn); color:#fff; border-color:var(--grn); }
+  .miss-done-group { display:inline-flex; gap:4px; align-items:center; }
 
   /* Table --------------------------------------------------------------- */
   .table-wrap { overflow-x:auto; background:var(--surface); border:1px solid var(--line); border-radius:12px; box-shadow:var(--shadow); }
@@ -653,19 +658,29 @@ function renderGaps(){
     </div>`;}).join('');
 })();
 
-/* ---------- File button ---------- */
+/* ---------- File buttons (view + download) ---------- */
+function dlUrl(url){ return url + (url.includes('?') ? '&' : '?') + 'dl=1'; }
+
 function fileBtnHtml(it){
   const f = fileMap[it.key];
-  if (f) return `<a class="file-btn has-file" href="${f.url}" target="_blank" rel="noopener" title="Download / view">View file</a>`;
+  if (f) return `<span class="file-acts">`+
+    `<a class="file-btn has-file" href="${f.url}" target="_blank" rel="noopener" title="View ${it.type} scan">View</a>`+
+    `<a class="file-btn dl" href="${dlUrl(f.url)}" download title="Download ${it.type} scan">Download</a>`+
+    `</span>`;
   if (!DATA.doc_api_url) return `<span class="file-btn disabled" title="Document storage not connected yet">Upload</span>`;
   return `<button class="file-btn" data-up="${it.key}" data-vid="${it.vehicle_id}" data-dtype="${it.type}" title="Upload a scan">Upload</button>`;
 }
 
 /* A missing required paper: blinks red until a scan is uploaded for it.
-   Click = upload that document's scan (stored under vehicleId|DocType). */
+   Click = upload that document's scan (stored under vehicleId|DocType).
+   Once uploaded it turns green and offers View + Download. */
 function missPillHtml(vid, dtype){
   const key = vid + '|' + dtype;
-  if (fileMap[key]) return `<a class="miss-pill done" href="${fileMap[key].url}" target="_blank" rel="noopener" title="${dtype} scan uploaded — view">✓ ${dtype}</a>`;
+  const f = fileMap[key];
+  if (f) return `<span class="miss-done-group">`+
+    `<a class="miss-pill done" href="${f.url}" target="_blank" rel="noopener" title="View ${dtype} scan">✓ ${dtype}</a>`+
+    `<a class="miss-dl" href="${dlUrl(f.url)}" download title="Download ${dtype} scan">↓</a>`+
+    `</span>`;
   if (DATA.doc_api_url) return `<button class="miss-pill need" data-up="${key}" data-vid="${vid}" data-dtype="${dtype}" title="Missing — tap to upload the ${dtype} scan">⬆ ${dtype}</button>`;
   return `<span class="miss-pill need" title="${dtype} missing">${dtype}</span>`;
 }

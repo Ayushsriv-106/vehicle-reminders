@@ -39,10 +39,13 @@ export async function onRequestGet({ request, env }) {
     const bin = atob(doc.data);
     const bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    // ?dl=1 forces a download (attachment); otherwise the file opens inline (view).
+    const disposition = url.searchParams.get("dl") ? "attachment" : "inline";
+    const filename = (doc.name || "document").replace(/"/g, "");
     return new Response(bytes, {
       headers: {
         "Content-Type": doc.mime || "application/octet-stream",
-        "Content-Disposition": `inline; filename="${(doc.name || "document").replace(/"/g, "")}"`,
+        "Content-Disposition": `${disposition}; filename="${filename}"`,
         "Cache-Control": "private, no-store",
       },
     });
