@@ -153,6 +153,7 @@ def build_dashboard(output_path: str | Path = "docs/index.html") -> None:
         })
         if missing:
             missing_report.append({
+                "id": v["id"],
                 "vehicle_name": v["name"],
                 "registration_number": v.get("registration_number", ""),
                 "owner_group": grp,
@@ -369,7 +370,22 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .veh-note { font-size:12px; color:var(--muted); margin:11px 0 0; }
   .missing-row { margin-top:11px; display:flex; flex-wrap:wrap; gap:6px; align-items:center; padding:9px 10px; background:var(--red-bg); border:1px solid var(--red-bd); border-radius:8px; }
   .missing-label { font-size:11px; color:var(--red); font-weight:700; text-transform:uppercase; letter-spacing:.03em; }
-  .miss-pill { font-size:11px; font-weight:600; padding:2px 8px; border-radius:6px; background:#fff; color:var(--red); border:1px solid var(--red-bd); }
+  .missing-hint { font-size:10.5px; color:var(--muted); width:100%; margin-top:2px; }
+  .miss-pill { font-size:11px; font-weight:600; padding:3px 9px; border-radius:6px; background:#fff; color:var(--red); border:1px solid var(--red-bd); display:inline-flex; align-items:center; gap:4px; }
+  /* Blinking red = "missing, please upload". Click to upload its scan. */
+  .miss-pill.need { cursor:pointer; }
+  button.miss-pill.need { font-family:inherit; }
+  .miss-pill.need:not(.uploading) { animation: blinkRed 1.15s ease-in-out infinite; }
+  .miss-pill.need:hover { background:var(--red); color:#fff; border-color:var(--red); animation:none; }
+  .miss-pill.done { background:var(--grn-bg); color:var(--grn); border-color:var(--grn-bd); cursor:default; animation:none; text-decoration:none; }
+  .miss-pill.uploading { opacity:.7; pointer-events:none; }
+  @keyframes blinkRed {
+    0%,100% { background:#fff; color:var(--red); border-color:var(--red-bd); box-shadow:0 0 0 0 rgba(217,45,32,0); }
+    50%     { background:#d92d20; color:#fff; border-color:#d92d20; box-shadow:0 0 0 3px rgba(217,45,32,.22); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .miss-pill.need:not(.uploading) { animation:none; background:#fff5f4; border-color:var(--red); color:var(--red); }
+  }
   .issue-badges { margin-top:9px; display:flex; flex-wrap:wrap; gap:6px; }
   .issue-badge { font-size:10.5px; padding:3px 8px; border-radius:6px; border:1px solid var(--line); color:var(--ink-2); background:var(--surface-2); display:inline-flex; gap:5px; align-items:center; }
 
@@ -607,9 +623,9 @@ function formatINR(n){
 })();
 
 /* ---------- Missing documents ---------- */
-(function(){
+function renderGaps(){
   const g=DATA.missing_report;
-  document.getElementById('gaps-meta').textContent = g.length ? g.length+' vehicle(s) with missing papers' : 'all clear';
+  document.getElementById('gaps-meta').textContent = g.length ? g.length+' vehicle(s) with missing papers — tap a blinking item to upload' : 'all clear';
   if(!g.length){ document.getElementById('gaps-grid').innerHTML='<div class="empty">Every vehicle has all its legally-required papers on record.</div>'; return; }
   document.getElementById('gaps-grid').innerHTML = g.map(v=>`
     <div class="gap-card">
@@ -617,10 +633,10 @@ function formatINR(n){
       <div class="g-reg">${v.registration_number||'—'} · ${v.owner_group}${v.has_any?'':' · <b style="color:var(--red)">no documents at all</b>'}</div>
       <div class="missing-row">
         <span class="missing-label">Missing</span>
-        ${v.missing.map(m=>`<span class="miss-pill">${m}</span>`).join('')}
+        ${v.missing.map(m=>missPillHtml(v.id,m)).join('')}
       </div>
     </div>`).join('');
-})();
+}
 
 /* ---------- Data review ---------- */
 (function(){
@@ -643,6 +659,15 @@ function fileBtnHtml(it){
   if (f) return `<a class="file-btn has-file" href="${f.url}" target="_blank" rel="noopener" title="Download / view">View file</a>`;
   if (!DATA.doc_api_url) return `<span class="file-btn disabled" title="Document storage not connected yet">Upload</span>`;
   return `<button class="file-btn" data-up="${it.key}" data-vid="${it.vehicle_id}" data-dtype="${it.type}" title="Upload a scan">Upload</button>`;
+}
+
+/* A missing required paper: blinks red until a scan is uploaded for it.
+   Click = upload that document's scan (stored under vehicleId|DocType). */
+function missPillHtml(vid, dtype){
+  const key = vid + '|' + dtype;
+  if (fileMap[key]) return `<a class="miss-pill done" href="${fileMap[key].url}" target="_blank" rel="noopener" title="${dtype} scan uploaded — view">✓ ${dtype}</a>`;
+  if (DATA.doc_api_url) return `<button class="miss-pill need" data-up="${key}" data-vid="${vid}" data-dtype="${dtype}" title="Missing — tap to upload the ${dtype} scan">⬆ ${dtype}</button>`;
+  return `<span class="miss-pill need" title="${dtype} missing">${dtype}</span>`;
 }
 
 /* ---------- Fleets ---------- */
@@ -675,7 +700,8 @@ function renderFleets(){
         </li>`).join('');
       const missing = v.missing.length ? `
         <div class="missing-row"><span class="missing-label">Missing</span>
-          ${v.missing.map(m=>`<span class="miss-pill">${m}</span>`).join('')}
+          ${v.missing.map(m=>missPillHtml(v.id,m)).join('')}
+          ${DATA.doc_api_url?'<span class="missing-hint">Blinking red = needed. Tap one to upload its scan.</span>':''}
         </div>` : '';
       const issues = (v.issues&&v.issues.length) ? `
         <div class="issue-badges">
@@ -770,10 +796,11 @@ fileInput.addEventListener('change',async()=>{
     const resp=await fetch(DATA.doc_api_url,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},
       body:JSON.stringify({action:'upload',token:DATA.doc_api_token,vehicle_id:vid,doc_type:dtype,filename:file.name,mimeType:file.type,dataBase64})});
     const j=await resp.json();
-    if(j.ok){ fileMap[key]={url:j.url,name:j.name||file.name}; renderFleets(); renderTable(); }
-    else { alert('Upload failed: '+(j.error||'unknown error')); btn.classList.remove('uploading'); btn.textContent='Upload'; }
-  }catch(err){ alert('Upload error: '+err.message); btn.classList.remove('uploading'); btn.textContent='Upload'; }
+    if(j.ok){ fileMap[key]={url:j.url,name:j.name||file.name}; }
+    else { alert('Upload failed: '+(j.error||'unknown error')); }
+  }catch(err){ alert('Upload error: '+err.message); }
   pendingUpload=null;
+  renderAll();   // restores button/pill state from fileMap (blink → ✓ on success)
 });
 
 async function loadFiles(){
@@ -781,9 +808,11 @@ async function loadFiles(){
   try{
     const r=await fetch(DATA.doc_api_url+(DATA.doc_api_url.includes('?')?'&':'?')+'action=files');
     const j=await r.json();
-    if(j&&j.files){ Object.assign(fileMap,j.files); renderFleets(); renderTable(); }
+    if(j&&j.files){ Object.assign(fileMap,j.files); renderAll(); }
   }catch(e){ /* non-fatal */ }
 }
+
+function renderAll(){ renderFleets(); renderTable(); renderGaps(); }
 
 /* ---------- Renewal calendar (.ics) ---------- */
 document.getElementById('btn-ics').addEventListener('click',()=>{
@@ -808,7 +837,7 @@ document.getElementById('btn-ics').addEventListener('click',()=>{
 document.getElementById('btn-print').addEventListener('click',()=>window.print());
 
 /* ---------- Boot ---------- */
-renderFleets(); renderTable(); loadFiles();
+renderAll(); loadFiles();
 </script>
 </body>
 </html>
